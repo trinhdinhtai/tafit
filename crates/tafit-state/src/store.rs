@@ -48,6 +48,7 @@ impl AppStore {
             repo_load: WorkerPool::new("tafit-repo-load", repo_load_threads()),
             cancel: CancellationToken::default(),
             status_reads: HashMap::new(),
+            diff_reads: HashMap::new(),
         };
         thread::Builder::new()
             .name("tafit-store".to_owned())
@@ -94,6 +95,8 @@ struct StoreWorker {
     /// Each Repository's latest status read. A newer read cancels the older
     /// one, whose result the reducer would drop anyway.
     status_reads: HashMap<RepoId, CancellationToken>,
+    /// Each Repository's latest diff read, cancelled the same way.
+    diff_reads: HashMap<RepoId, CancellationToken>,
 }
 
 impl StoreWorker {
@@ -117,7 +120,7 @@ impl StoreWorker {
             }
         }
         self.cancel.cancel();
-        for read in self.status_reads.values() {
+        for read in self.status_reads.values().chain(self.diff_reads.values()) {
             read.cancel();
         }
     }
@@ -134,8 +137,10 @@ impl StoreWorker {
                 let _ = commands.send(Command::Msg(Msg::RepoOpened { repo_id, result }));
             }),
             Effect::CloseRepo { repo_id } => {
-                if let Some(read) = self.status_reads.remove(&repo_id) {
-                    read.cancel();
+                for reads in [&mut self.status_reads, &mut self.diff_reads] {
+                    if let Some(read) = reads.remove(&repo_id) {
+                        read.cancel();
+                    }
                 }
             }
             Effect::DetectGit { request } => self.repo_load.execute(move || {
@@ -156,6 +161,28 @@ impl StoreWorker {
                         .open(&path, &read)
                         .and_then(|repo| repo.status(&read));
                     let _ = commands.send(Command::Msg(Msg::StatusLoaded {
+                        repo_id,
+                        request,
+                        result,
+                    }));
+                });
+            }
+            Effect::LoadDiff {
+                repo_id,
+                request,
+                path,
+                source,
+                paths,
+            } => {
+                let read = CancellationToken::default();
+                if let Some(older) = self.diff_reads.insert(repo_id, read.clone()) {
+                    older.cancel();
+                }
+                self.repo_load.execute(move || {
+                    let result = backend
+                        .open(&path, &read)
+                        .and_then(|repo| repo.diff(source, &paths, &read));
+                    let _ = commands.send(Command::Msg(Msg::DiffLoaded {
                         repo_id,
                         request,
                         result,

@@ -1,5 +1,5 @@
-//! Status reads finishing out of order, driven through the synchronous
-//! reducer: real reads can't be made to finish in a chosen order.
+//! Status reads and writes finishing in a chosen order, driven through the
+//! synchronous reducer: real ones can't be made to finish in a chosen order.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -178,4 +178,30 @@ fn a_refresh_finishing_during_a_write_does_not_end_it() {
     reduce(&mut state, loaded(repo_id, refresh, untracked("a.txt")));
 
     assert!(state.active().expect("a Repository is open").writing);
+}
+
+#[test]
+fn the_message_cannot_change_while_its_commit_runs() {
+    let staged = RepositoryStatus {
+        staged: vec![FileChange {
+            path: "a.txt".to_owned(),
+            kind: ChangeKind::Added,
+        }],
+        ..RepositoryStatus::default()
+    };
+    let (mut state, repo_id, first) = opened();
+    reduce(&mut state, loaded(repo_id, first, staged));
+    let edit = |message: &str| Msg::EditCommitMessage {
+        repo_id,
+        message: message.to_owned(),
+    };
+    reduce(&mut state, edit("Add a"));
+    let commit = reduce(&mut state, Msg::Commit(repo_id));
+    assert!(matches!(commit[..], [Effect::Commit { .. }]), "{commit:?}");
+
+    reduce(&mut state, edit("Add a, and more typed meanwhile"));
+
+    let repo = state.active().expect("a Repository is open");
+    assert!(repo.committing);
+    assert_eq!(repo.commit_message, "Add a");
 }

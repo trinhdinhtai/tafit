@@ -177,6 +177,22 @@ impl StoreWorker {
                     .and_then(|repo| repo.unstage(&paths, &cancel));
                 let _ = commands.send(Command::Msg(Msg::IndexUpdated { repo_id, result }));
             }),
+            Effect::Commit {
+                repo_id,
+                path,
+                message,
+            } => self.repo_load.execute(move || {
+                let result = backend
+                    .open(&path, &cancel)
+                    .and_then(|repo| repo.commit(&message, &cancel));
+                let _ = commands.send(Command::Msg(Msg::Committed { repo_id, result }));
+            }),
+            Effect::LoadInfo { repo_id, path } => self.repo_load.execute(move || {
+                let result = backend
+                    .open(&path, &cancel)
+                    .and_then(|repo| repo.info(&cancel));
+                let _ = commands.send(Command::Msg(Msg::InfoLoaded { repo_id, result }));
+            }),
         }
     }
 }

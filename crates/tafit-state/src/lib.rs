@@ -97,9 +97,18 @@ pub struct RepoState {
     pub writing: bool,
     /// The write finished; `writing` ends once the status read after it lands.
     write_settling: bool,
+    /// The running write is a commit. Its message is frozen until it ends,
+    /// since a made commit clears it.
+    pub committing: bool,
     /// Why the last write failed or was refused, in full (git's output
     /// included); cleared when the next write starts.
     pub write_error: Option<String>,
+    /// The message of the next commit, as typed. Kept when a commit fails;
+    /// cleared once one is made.
+    pub commit_message: String,
+    /// Commits made from this Repository Tab. The UI empties its message box
+    /// when this grows.
+    pub commits_made: u64,
 }
 
 impl RepoState {
@@ -114,8 +123,26 @@ impl RepoState {
             selection: BTreeSet::new(),
             writing: false,
             write_settling: false,
+            committing: false,
             write_error: None,
+            commit_message: String::new(),
+            commits_made: 0,
         }
+    }
+
+    /// Why a commit can't be made now, for the user; `None` when it can.
+    /// A running write isn't a reason: the commit button waits for it.
+    pub fn commit_refusal(&self) -> Option<&'static str> {
+        let Loadable::Ready(status) = &self.status else {
+            return Some("The change list hasn't loaded yet.");
+        };
+        if status.staged.is_empty() && !status.merge_in_progress {
+            return Some("Nothing is staged. Stage the changes to commit first.");
+        }
+        if self.commit_message.trim().is_empty() {
+            return Some("Write a commit message first.");
+        }
+        None
     }
 
     /// Whether the row for `path` in `group` is selected.
@@ -248,6 +275,24 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<(), GitError>,
     },
+    /// The commit message box changed.
+    EditCommitMessage {
+        repo_id: RepoId,
+        message: String,
+    },
+    /// Commit what is staged with `RepoState::commit_message`; refused, with
+    /// the reason in `write_error`, when `commit_refusal` gives one.
+    Commit(RepoId),
+    /// Result of `Effect::Commit`.
+    Committed {
+        repo_id: RepoId,
+        result: Result<(), GitError>,
+    },
+    /// Result of `Effect::LoadInfo`.
+    InfoLoaded {
+        repo_id: RepoId,
+        result: Result<RepositoryInfo, GitError>,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -277,6 +322,17 @@ pub enum Effect {
         repo_id: RepoId,
         path: PathBuf,
         paths: Vec<String>,
+    },
+    /// Commit what is staged with this message.
+    Commit {
+        repo_id: RepoId,
+        path: PathBuf,
+        message: String,
+    },
+    /// Re-read what HEAD points at (after a commit moved it).
+    LoadInfo {
+        repo_id: RepoId,
+        path: PathBuf,
     },
 }
 
@@ -335,6 +391,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 if repo.write_settling {
                     repo.write_settling = false;
                     repo.writing = false;
+                    repo.committing = false;
                 }
             }
             Vec::new()
@@ -420,5 +477,60 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             Some(repo) => vec![repo.finish_write(result)],
             None => Vec::new(),
         },
+        Msg::EditCommitMessage { repo_id, message } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && !repo.committing
+            {
+                repo.commit_message = message;
+            }
+            Vec::new()
+        }
+        Msg::Commit(repo_id) => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            if repo.writing || !matches!(repo.open, Loadable::Ready(_)) {
+                return Vec::new();
+            }
+            if let Some(refusal) = repo.commit_refusal() {
+                repo.write_error = Some(refusal.to_owned());
+                return Vec::new();
+            }
+            repo.start_write();
+            repo.committing = true;
+            vec![Effect::Commit {
+                repo_id,
+                path: repo.path.clone(),
+                message: repo.commit_message.clone(),
+            }]
+        }
+        Msg::Committed { repo_id, result } => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let made = result.is_ok();
+            let mut effects = vec![repo.finish_write(result)];
+            if made {
+                repo.commit_message.clear();
+                repo.commits_made += 1;
+                effects.push(Effect::LoadInfo {
+                    repo_id,
+                    path: repo.path.clone(),
+                });
+            }
+            effects
+        }
+        Msg::InfoLoaded { repo_id, result } => {
+            // shortcut: no request id; reads only follow commits, which run
+            // one at a time, so an older read finishing last is unlikely.
+            // A failed re-read keeps the last HEAD; the status read after
+            // the commit reports a Repository that went bad.
+            if let Some(repo) = state.repo_mut(repo_id)
+                && let Ok(info) = result
+            {
+                repo.open = Loadable::Ready(info);
+            }
+            Vec::new()
+        }
     }
 }

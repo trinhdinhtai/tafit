@@ -5,6 +5,7 @@ mod support;
 use std::sync::Arc;
 
 use support::{TestRepo, TestStore};
+use tafit_core::Head;
 use tafit_state::{AppState, ChangeGroup, FileRef, Loadable, Msg, RepoId, RepoState, SelectMode};
 
 /// Opens `repo` in a fresh store once its change list has loaded.
@@ -213,4 +214,164 @@ fn toggling_a_selected_file_unselects_it() {
     let state = store.store.snapshot();
     let selected: Vec<_> = active(&state).selection.iter().cloned().collect();
     assert_eq!(selected, [file(ChangeGroup::Untracked, "b.txt")]);
+}
+
+fn edit_message(store: &TestStore, repo_id: RepoId, message: &str) {
+    store.dispatch(Msg::EditCommitMessage {
+        repo_id,
+        message: message.to_owned(),
+    });
+}
+
+/// How many commits HEAD has.
+fn commit_count(repo: &TestRepo) -> String {
+    repo.git(&["rev-list", "--count", "HEAD"])
+}
+
+#[test]
+fn committing_records_the_staged_files_and_updates_head_and_the_change_list() {
+    let repo = TestRepo::init("fresh");
+    repo.write("a.txt", "a\n");
+    repo.write("later.txt", "not staged\n");
+    let (store, repo_id) = open(&repo);
+    assert!(matches!(
+        &active(&store.store.snapshot()).open,
+        Loadable::Ready(info) if info.head == Head::Unborn("main".to_owned())
+    ));
+    select(
+        &store,
+        repo_id,
+        file(ChangeGroup::Untracked, "a.txt"),
+        SelectMode::Only,
+    );
+    store.dispatch(Msg::StageSelected(repo_id));
+    wait_settled(&store);
+    edit_message(&store, repo_id, "Add a\n\nThe first file.");
+
+    store.dispatch(Msg::Commit(repo_id));
+
+    store.flush();
+    let state = store.wait_until(|state| {
+        state.active().is_some_and(|repo| {
+            settled(repo)
+                && matches!(&repo.open, Loadable::Ready(info) if info.head == Head::Branch("main".to_owned()))
+        })
+    });
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%B"]),
+        "Add a\n\nThe first file."
+    );
+    assert_eq!(
+        repo.git(&["show", "--format=", "--name-only", "HEAD"]),
+        "a.txt"
+    );
+    let repo_state = active(&state);
+    assert_eq!(repo_state.write_error, None);
+    assert_eq!(
+        repo_state.commit_message, "",
+        "a made commit clears the message"
+    );
+    assert_eq!(repo_state.commits_made, 1);
+    let Loadable::Ready(status) = &repo_state.status else {
+        unreachable!("settled")
+    };
+    assert!(status.staged.is_empty());
+    assert_eq!(status.untracked.len(), 1, "later.txt is still untracked");
+}
+
+#[test]
+fn a_commit_with_nothing_staged_is_refused_and_keeps_the_message() {
+    let repo = TestRepo::with_commit("repo");
+    repo.write("a.txt", "not staged\n");
+    let (store, repo_id) = open(&repo);
+    edit_message(&store, repo_id, "Add a");
+
+    store.dispatch(Msg::Commit(repo_id));
+
+    let state = wait_settled(&store);
+    let repo_state = active(&state);
+    assert_eq!(
+        repo_state.write_error.as_deref(),
+        Some("Nothing is staged. Stage the changes to commit first.")
+    );
+    assert_eq!(repo_state.commit_message, "Add a");
+    assert_eq!(repo_state.commits_made, 0);
+    assert_eq!(commit_count(&repo), "1", "no commit was made");
+}
+
+#[test]
+fn a_failing_pre_commit_hook_fails_the_commit_with_its_output_and_keeps_the_message() {
+    let repo = TestRepo::with_commit("repo");
+    repo.hook("pre-commit", "echo 'lint: 3 problems in a.txt' >&2\nexit 1");
+    repo.write("a.txt", "a\n");
+    repo.git(&["add", "a.txt"]);
+    let (store, repo_id) = open(&repo);
+    edit_message(&store, repo_id, "Add a");
+
+    store.dispatch(Msg::Commit(repo_id));
+
+    let state = wait_settled(&store);
+    let repo_state = active(&state);
+    let error = repo_state
+        .write_error
+        .as_deref()
+        .expect("the commit failed");
+    assert!(
+        error.contains("lint: 3 problems in a.txt"),
+        "the hook's output is shown: {error}"
+    );
+    assert_eq!(repo_state.commit_message, "Add a");
+    assert_eq!(repo_state.commits_made, 0);
+    assert_eq!(commit_count(&repo), "1", "no commit was made");
+    assert_eq!(
+        staged_in_git(&repo),
+        "a.txt",
+        "still staged for another try"
+    );
+}
+
+#[test]
+fn a_merge_left_to_conclude_commits_with_nothing_staged() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.txt", "base\n")], "base");
+    repo.git(&["switch", "--quiet", "-c", "other"]);
+    repo.commit_files(&[("a.txt", "same\n")], "theirs");
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.commit_files(&[("a.txt", "same\n")], "ours");
+    repo.git(&["merge", "--quiet", "--no-ff", "--no-commit", "other"]);
+    assert_eq!(staged_in_git(&repo), "", "both sides made the same change");
+    let (store, repo_id) = open(&repo);
+    edit_message(&store, repo_id, "Merge other");
+
+    store.dispatch(Msg::Commit(repo_id));
+
+    store.flush();
+    let state = store.wait_until(|state| {
+        state
+            .active()
+            .is_some_and(|repo| settled(repo) && repo.commits_made == 1)
+    });
+    assert_eq!(active(&state).write_error, None);
+    let parents = repo.git(&["rev-list", "--parents", "-1", "HEAD"]);
+    assert_eq!(parents.split(' ').count(), 3, "a merge commit: {parents}");
+}
+
+#[test]
+fn hooks_match_globs_in_pathspecs_as_they_do_from_the_git_cli() {
+    let repo = TestRepo::with_commit("repo");
+    // Lint-staged style: pick the staged files of one kind by glob.
+    repo.hook(
+        "pre-commit",
+        "test -n \"$(git diff --cached --name-only -- '*.txt')\" || { echo 'the glob matched nothing' >&2; exit 1; }",
+    );
+    repo.write("a.txt", "a\n");
+    repo.git(&["add", "a.txt"]);
+    let (store, repo_id) = open(&repo);
+    edit_message(&store, repo_id, "Add a");
+
+    store.dispatch(Msg::Commit(repo_id));
+
+    let state = wait_settled(&store);
+    assert_eq!(active(&state).write_error, None);
+    assert_eq!(commit_count(&repo), "2");
 }

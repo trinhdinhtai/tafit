@@ -55,9 +55,13 @@ pub struct RepositoryStatus {
     pub unstaged: Vec<FileChange>,
     /// Files git doesn't track and doesn't ignore; always `ChangeKind::Added`.
     pub untracked: Vec<FileChange>,
+    /// A merge stopped before committing (`MERGE_HEAD` exists), so a commit
+    /// concludes it even with nothing staged.
+    pub merge_in_progress: bool,
 }
 
 impl RepositoryStatus {
+    /// No changed files. A merge in progress can still be committed.
     pub fn is_clean(&self) -> bool {
         self.staged.is_empty() && self.unstaged.is_empty() && self.untracked.is_empty()
     }

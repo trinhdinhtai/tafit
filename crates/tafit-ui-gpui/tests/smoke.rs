@@ -191,6 +191,7 @@ fn the_change_list_shows_its_three_groups(cx: &mut TestAppContext) {
             change("gone.txt", ChangeKind::Deleted),
         ],
         untracked: vec![change("notes/", ChangeKind::Added)],
+        ..RepositoryStatus::default()
     };
 
     let cx = render(with_status(state_with_open_repository(), status), cx);

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trinhdinhtai/tafit"
+rust-version = "1.99"
+
+[workspace.dependencies]
+# Internal crates
+tafit-app = { path = "crates/tafit-app", default-features = false }
+tafit-base = { path = "crates/tafit-base" }
+tafit-core = { path = "crates/tafit-core" }
+tafit-git-gix = { path = "crates/tafit-git-gix" }
+tafit-perf = { path = "crates/tafit-perf" }
+tafit-state = { path = "crates/tafit-state" }
+tafit-text = { path = "crates/tafit-text" }
+tafit-ui-gpui = { path = "crates/tafit-ui-gpui" }
+tafit-ui-kit = { path = "crates/tafit-ui-kit" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Dependencies use the same settings under `cargo build` and `cargo test`, so
+# switching between them reuses every artifact.
+[profile.dev.package."*"]
+opt-level = 1
+debug = "line-tables-only"
+
+# Layout, rendering and text shaping run on the UI thread every frame; keep them
+# optimized so a debug build still scrolls smoothly.
+[profile.dev.package.gpui-ce]
+opt-level = 2
+
+[profile.dev.package.gpui_ce_windows]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
+[profile.dev.package.harfrust]
+opt-level = 2
+
+[profile.dev.package.read-fonts]
+opt-level = 2
+
+[profile.dev.package.font-types]
+opt-level = 2
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

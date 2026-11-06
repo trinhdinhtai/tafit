@@ -44,6 +44,8 @@ pub struct RepoState {
     /// The change list, read once the Repository opens. Shared, so cloning
     /// the state stays cheap with tens of thousands of changes.
     pub status: Loadable<Arc<RepositoryStatus>>,
+    /// A status read is running; `status` still holds the previous result.
+    pub status_refreshing: bool,
     /// The latest status read; only its result is kept.
     status_request: StatusRequestId,
 }
@@ -52,6 +54,7 @@ impl RepoState {
     /// Starts a new status read, superseding any still running.
     fn request_status(&mut self) -> Effect {
         self.status_request = StatusRequestId(self.status_request.0 + 1);
+        self.status_refreshing = true;
         Effect::LoadStatus {
             repo_id: self.id,
             request: self.status_request,
@@ -96,6 +99,8 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<RepositoryInfo, GitError>,
     },
+    /// Re-read the Repository's change list (the manual refresh).
+    RefreshStatus(RepoId),
     /// Result of `Effect::LoadStatus`.
     StatusLoaded {
         repo_id: RepoId,
@@ -143,6 +148,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 path: path.clone(),
                 open: Loadable::Loading,
                 status: Loadable::Loading,
+                status_refreshing: false,
                 status_request: StatusRequestId::default(),
             });
             state.active_repo = Some(repo_id);
@@ -177,9 +183,15 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     Ok(status) => Loadable::Ready(Arc::new(status)),
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                repo.status_refreshing = false;
             }
             Vec::new()
         }
+        Msg::RefreshStatus(repo_id) => match state.repo_mut(repo_id) {
+            // An unopened Repository reads its status once it opens.
+            Some(repo) if matches!(repo.open, Loadable::Ready(_)) => vec![repo.request_status()],
+            _ => Vec::new(),
+        },
         Msg::DetectGit => {
             let request = GitRequestId(state.git_request.0 + 1);
             state.git_request = request;

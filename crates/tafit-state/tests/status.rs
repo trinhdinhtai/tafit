@@ -161,6 +161,30 @@ fn a_bare_repository_has_no_changes() {
 
     assert!(status(repo.path()).is_clean());
 }
+
+#[test]
+fn refreshing_picks_up_changes_made_since_the_last_read() {
+    let repo = TestRepo::with_commit("repo");
+    let store = TestStore::new();
+    store.dispatch(Msg::OpenRepo(repo.path().to_owned()));
+    let opened = store.wait_until(|state| {
+        state
+            .active()
+            .is_some_and(|repo| matches!(repo.status, Loadable::Ready(_)))
+    });
+    let repo_id = opened.active_repo.expect("the opened Repository is active");
+    repo.write("later.txt", "written after opening\n");
+
+    store.dispatch(Msg::RefreshStatus(repo_id));
+
+    store.wait_until(|state| {
+        state.active().is_some_and(|repo| match &repo.status {
+            Loadable::Ready(status) => status.untracked == [change("later.txt", ChangeKind::Added)],
+            _ => false,
+        })
+    });
+}
+
 #[test]
 fn a_file_added_with_intent_to_add_is_a_new_unstaged_file() {
     let repo = TestRepo::with_commit("repo");

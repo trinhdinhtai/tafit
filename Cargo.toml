@@ -32,6 +32,9 @@ gpui = { package = "gpui-ce", git = "https://github.com/Havunen/gpui-ce.git", re
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/Havunen/gpui-ce.git", rev = "4b3b9c54191be9762095dcdf7656d0d3ca30cecf" }
 # Decodes the window icon; already in the graph through gpui.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+# Signals a git command's process group on cancel (Unix); already in the
+# graph through gpui.
+rustix = { version = "1.1.6", features = ["process"] }
 # Reads font tables in tests; already in the graph through gpui.
 skrifa = "0.49"
 tempfile = "3.27.0"

@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 gpui = { workspace = true }
+gpui_elements = { workspace = true }
 
 [dev-dependencies]
 skrifa = { workspace = true }

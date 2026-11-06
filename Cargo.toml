@@ -33,6 +33,9 @@ embed-resource = "3.0.12"
 # `status` reads the change list (HEAD vs index vs work tree).
 gix = { version = "0.90.0", default-features = false, features = ["sha1", "parallel", "status"] }
 gpui = { package = "gpui-ce", git = "https://github.com/Havunen/gpui-ce.git", rev = "4b3b9c54191be9762095dcdf7656d0d3ca30cecf" }
+# Editable text (IME, selection, undo) under the ui-kit text area; same
+# gpui-ce rev as gpui.
+gpui_elements = { package = "gpui_ce_elements", git = "https://github.com/Havunen/gpui-ce.git", rev = "4b3b9c54191be9762095dcdf7656d0d3ca30cecf" }
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/Havunen/gpui-ce.git", rev = "4b3b9c54191be9762095dcdf7656d0d3ca30cecf" }
 # Decodes the window icon; already in the graph through gpui.
 image = { version = "0.25.10", default-features = false, features = ["png"] }

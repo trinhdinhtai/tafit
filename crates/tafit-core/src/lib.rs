@@ -213,11 +213,24 @@ pub trait GitBackend: Send + Sync {
     ) -> Result<Arc<dyn GitRepository>, GitError>;
 }
 
-/// An open Repository. Read methods take a `CancellationToken`.
+/// An open Repository. Every method takes a `CancellationToken`; writes run
+/// the system git (ADR-0002), so the user's hooks and config apply.
 pub trait GitRepository: Send + Sync {
     fn info(&self, cancel: &CancellationToken) -> Result<RepositoryInfo, GitError>;
 
     /// The change list: staged, unstaged and untracked files. Empty for a
     /// bare Repository, which has no work tree.
     fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError>;
+
+    /// Stages each repo-relative path (a file, or an untracked folder ending
+    /// in `/`) as it is in the work tree, a deletion included.
+    fn stage(&self, paths: &[String], cancel: &CancellationToken) -> Result<(), GitError>;
+
+    /// Resets each repo-relative path in the index to HEAD; on a branch with
+    /// no commit yet, removes it from the index. The work tree is untouched.
+    fn unstage(&self, paths: &[String], cancel: &CancellationToken) -> Result<(), GitError>;
+
+    /// Commits what is staged with `message`, as `git commit` does: hooks
+    /// run, and `commit.gpgsign` signs it.
+    fn commit(&self, message: &str, cancel: &CancellationToken) -> Result<(), GitError>;
 }

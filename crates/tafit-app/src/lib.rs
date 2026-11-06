@@ -18,6 +18,7 @@ pub fn run() -> ExitCode {
         }
     };
     let (store, events) = AppStore::new(Arc::new(GixBackend::default()));
+    store.dispatch(Msg::DetectGit);
     store.dispatch(Msg::OpenRepo(path));
     run_ui(store, events)
 }

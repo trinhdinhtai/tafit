@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::thread;
 
 use tafit_core::{CancellationToken, GitBackend};
 
-use crate::{AppState, Effect, Msg, reduce};
+use crate::{AppState, Effect, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -44,6 +45,7 @@ impl AppStore {
             commands: commands.clone(),
             repo_load: WorkerPool::new("tafit-repo-load", repo_load_threads()),
             cancel: CancellationToken::default(),
+            status_reads: HashMap::new(),
         };
         thread::Builder::new()
             .name("tafit-store".to_owned())
@@ -78,10 +80,13 @@ struct StoreWorker {
     repo_load: WorkerPool,
     /// Cancelled at shutdown so in-flight reads stop early.
     cancel: CancellationToken,
+    /// Each Repository's latest status read. A newer read cancels the older
+    /// one, whose result the reducer would drop anyway.
+    status_reads: HashMap<RepoId, CancellationToken>,
 }
 
 impl StoreWorker {
-    fn run(self, commands: mpsc::Receiver<Command>) {
+    fn run(mut self, commands: mpsc::Receiver<Command>) {
         let mut current = read(&self.state);
         while let Ok(Command::Msg(msg)) = commands.recv() {
             let effects = reduce(Arc::make_mut(&mut current), msg);
@@ -93,9 +98,12 @@ impl StoreWorker {
             }
         }
         self.cancel.cancel();
+        for read in self.status_reads.values() {
+            read.cancel();
+        }
     }
 
-    fn schedule(&self, effect: Effect) {
+    fn schedule(&mut self, effect: Effect) {
         let backend = Arc::clone(&self.backend);
         let commands = self.commands.clone();
         let cancel = self.cancel.clone();
@@ -110,6 +118,26 @@ impl StoreWorker {
                 let result = backend.detect_git(&cancel);
                 let _ = commands.send(Command::Msg(Msg::GitDetected { request, result }));
             }),
+            Effect::LoadStatus {
+                repo_id,
+                request,
+                path,
+            } => {
+                let read = CancellationToken::default();
+                if let Some(older) = self.status_reads.insert(repo_id, read.clone()) {
+                    older.cancel();
+                }
+                self.repo_load.execute(move || {
+                    let result = backend
+                        .open(&path, &read)
+                        .and_then(|repo| repo.status(&read));
+                    let _ = commands.send(Command::Msg(Msg::StatusLoaded {
+                        repo_id,
+                        request,
+                        result,
+                    }));
+                });
+            }
         }
     }
 }

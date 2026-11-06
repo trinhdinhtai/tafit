@@ -72,10 +72,48 @@ impl TestRepo {
         self.git(&["commit", "--quiet", "--allow-empty", "-m", message]);
     }
 
+    /// Writes `contents` to the repo-relative `path`, creating its folders.
+    pub fn write(&self, path: &str, contents: &str) {
+        let path = self.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("a file path has a parent"))
+            .expect("create parent folders");
+        std::fs::write(path, contents).expect("write test file");
+    }
+
+    /// Deletes the repo-relative file `path` from the work tree only.
+    pub fn delete(&self, path: &str) {
+        std::fs::remove_file(self.path().join(path)).expect("delete test file");
+    }
+
+    /// Writes and commits each `(path, contents)`.
+    pub fn commit_files(&self, files: &[(&str, &str)], message: &str) {
+        for (path, contents) in files {
+            self.write(path, contents);
+            self.git(&["add", "--", path]);
+        }
+        self.commit(message);
+    }
+
     /// Runs git in the repo, isolated from the user's and system's config,
     /// and returns trimmed stdout. Panics if git fails.
     pub fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = self.run_git(args);
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// Like `git`, for a command expected to fail (a conflicting merge);
+    /// returns whether it succeeded.
+    pub fn try_git(&self, args: &[&str]) -> bool {
+        self.run_git(args).status.success()
+    }
+
+    fn run_git(&self, args: &[&str]) -> std::process::Output {
+        Command::new("git")
             .current_dir(self.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", null_device())
@@ -89,13 +127,7 @@ impl TestRepo {
             ])
             .args(args)
             .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            .expect("run git")
     }
 }
 

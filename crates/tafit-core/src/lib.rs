@@ -67,6 +67,144 @@ impl RepositoryStatus {
     }
 }
 
+/// Which two versions of a file a diff compares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffSource {
+    /// HEAD against the index.
+    Staged,
+    /// The index against the work tree.
+    Unstaged,
+    /// Nothing against an untracked file in the work tree.
+    Untracked,
+}
+
+/// A Line Diff of one file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileDiff {
+    /// The hunks, in file order; none when only the mode changed.
+    Text(Vec<Hunk>),
+    /// git found binary content; there is nothing to show line by line.
+    Binary,
+}
+
+impl FileDiff {
+    /// Parses `git diff` output for one file. Only the hunks are read, never
+    /// the file names in the headers, so how git quotes a name can't matter.
+    pub fn parse(output: &[u8]) -> Self {
+        let mut hunks: Vec<Hunk> = Vec::new();
+        // Lines still expected in the current hunk, old side and new side,
+        // and the line numbers the next line gets.
+        let (mut old_left, mut new_left) = (0u32, 0u32);
+        let (mut old_next, mut new_next) = (0u32, 0u32);
+        for raw in output.split(|&byte| byte == b'\n') {
+            // `\ No newline at end of file` follows the line it is about, which
+            // may be mid-hunk (`-a`, `\ …`, `+a`). No hunk line starts with `\`.
+            if raw.starts_with(b"\\") {
+                if let Some(line) = hunks.last_mut().and_then(|hunk| hunk.lines.last_mut()) {
+                    line.no_newline_at_end = true;
+                }
+            } else if old_left > 0 || new_left > 0 {
+                let hunk = hunks.last_mut().expect("counts are set by a hunk header");
+                let (kind, text) = match raw.split_first() {
+                    Some((b'+', text)) => (LineKind::Added, text),
+                    Some((b'-', text)) => (LineKind::Removed, text),
+                    Some((_, text)) => (LineKind::Context, text),
+                    // An empty context line, should git ever drop its space.
+                    None => (LineKind::Context, raw),
+                };
+                let (mut old_line, mut new_line) = (None, None);
+                if kind != LineKind::Added {
+                    old_line = Some(old_next);
+                    old_next += 1;
+                    old_left = old_left.saturating_sub(1);
+                }
+                if kind != LineKind::Removed {
+                    new_line = Some(new_next);
+                    new_next += 1;
+                    new_left = new_left.saturating_sub(1);
+                }
+                hunk.lines.push(DiffLine {
+                    kind,
+                    old_line,
+                    new_line,
+                    // shortcut: a line that isn't UTF-8 is shown lossily, and
+                    // a CRLF line loses its `\r`; staging lines (#11) will
+                    // need the exact bytes.
+                    text: String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text))
+                        .into_owned(),
+                    no_newline_at_end: false,
+                });
+            } else if let Some(hunk) = Hunk::parse_header(raw) {
+                (old_left, new_left) = (hunk.old_count, hunk.new_count);
+                (old_next, new_next) = (hunk.old_start, hunk.new_start);
+                hunks.push(hunk);
+            } else if hunks.is_empty() && raw.starts_with(b"Binary files ") {
+                return Self::Binary;
+            }
+        }
+        Self::Text(hunks)
+    }
+}
+
+/// One `@@` hunk of a Line Diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    /// The first line on the old side; 0 when that side is empty.
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    /// The header line as git printed it, e.g. `@@ -1,3 +1,4 @@ fn main()`.
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+impl Hunk {
+    /// `@@ -a[,b] +c[,d] @@ …`; a combined diff's `@@@` is not one.
+    fn parse_header(raw: &[u8]) -> Option<Self> {
+        let header = std::str::from_utf8(raw).ok()?.trim_end_matches('\r');
+        let ranges = header.strip_prefix("@@ -")?;
+        let (ranges, _) = ranges.split_once(" @@")?;
+        let (old, new) = ranges.split_once(" +")?;
+        let range = |range: &str| -> Option<(u32, u32)> {
+            match range.split_once(',') {
+                Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+                None => Some((range.parse().ok()?, 1)),
+            }
+        };
+        let ((old_start, old_count), (new_start, new_count)) = (range(old)?, range(new)?);
+        Some(Self {
+            old_start,
+            old_count,
+            new_start,
+            new_count,
+            header: header.to_owned(),
+            lines: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+/// One line of a hunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffLine {
+    pub kind: LineKind,
+    /// 1-based; `None` for an added line.
+    pub old_line: Option<u32>,
+    /// 1-based; `None` for a removed line.
+    pub new_line: Option<u32>,
+    /// The line without its `+`/`-`/` ` marker and line ending.
+    pub text: String,
+    /// The file ends here without a newline.
+    pub no_newline_at_end: bool,
+}
+
 /// A git version, as printed by `git --version`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitVersion {
@@ -221,6 +359,17 @@ pub trait GitRepository: Send + Sync {
     /// The change list: staged, unstaged and untracked files. Empty for a
     /// bare Repository, which has no work tree.
     fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError>;
+
+    /// The Line Diff of one file from `source`, read from `git diff` with a
+    /// fixed config so the user's (external diff, color, quotepath) can't
+    /// change it (ADR-0002). `paths` is the file's repo-relative path, or a
+    /// rename's old path then new path.
+    fn diff(
+        &self,
+        source: DiffSource,
+        paths: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<FileDiff, GitError>;
 
     /// Stages each repo-relative path (a file, or an untracked folder ending
     /// in `/`) as it is in the work tree, a deletion included.

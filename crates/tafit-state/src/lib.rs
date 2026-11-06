@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
-    ChangeKind, FileChange, GitEnvironment, GitError, RepositoryInfo, RepositoryStatus,
+    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, RepositoryInfo,
+    RepositoryStatus,
 };
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
@@ -44,6 +45,19 @@ pub struct GitRequestId(u64);
 /// replace a newer one's result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatusRequestId(u64);
+
+/// Identifies one diff read of a Repository, so an older read (of another
+/// file, or of the same file before it changed) can't replace a newer one's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiffRequestId(u64);
+
+/// The Line Diff of the one selected file.
+#[derive(Clone, Debug)]
+pub struct DiffState {
+    pub file: FileRef,
+    /// While a newer read of the same file runs, the previous result stays.
+    pub diff: Loadable<Arc<FileDiff>>,
+}
 
 /// One of the change list's three groups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -116,6 +130,11 @@ pub struct RepoState {
     /// Commits made from this Repository Tab. The UI empties its message box
     /// when this grows.
     pub commits_made: u64,
+    /// The diff of the selected file; `None` unless exactly one file (not
+    /// an untracked folder) is selected.
+    pub diff: Option<DiffState>,
+    /// The latest diff read; only its result is kept.
+    diff_request: DiffRequestId,
 }
 
 impl RepoState {
@@ -134,7 +153,58 @@ impl RepoState {
             write_error: None,
             commit_message: String::new(),
             commits_made: 0,
+            diff: None,
+            diff_request: DiffRequestId::default(),
         }
+    }
+
+    /// Points the diff at the one selected file, reading it if it is new or
+    /// `reread` (its content may have changed). `None` when nothing is read.
+    fn sync_diff(&mut self, reread: bool) -> Option<Effect> {
+        let Loadable::Ready(status) = &self.status else {
+            self.diff = None;
+            return None;
+        };
+        let mut selected = self.selection.iter();
+        let file = match (selected.next(), selected.next()) {
+            (Some(file), None) if !file.path.ends_with('/') => file.clone(),
+            _ => {
+                self.diff = None;
+                return None;
+            }
+        };
+        let same_file = self.diff.as_ref().is_some_and(|diff| diff.file == file);
+        if same_file && !reread {
+            return None;
+        }
+        let files = file.group.files(status);
+        let Ok(ix) = files.binary_search_by(|change| change.path.cmp(&file.path)) else {
+            self.diff = None;
+            return None;
+        };
+        let mut paths = Vec::with_capacity(2);
+        if let ChangeKind::Renamed { from } = &files[ix].kind {
+            paths.push(from.clone());
+        }
+        paths.push(file.path.clone());
+        if !same_file {
+            self.diff = Some(DiffState {
+                file: file.clone(),
+                diff: Loadable::Loading,
+            });
+        }
+        self.diff_request = DiffRequestId(self.diff_request.0 + 1);
+        Some(Effect::LoadDiff {
+            repo_id: self.id,
+            request: self.diff_request,
+            path: self.path.clone(),
+            source: match file.group {
+                ChangeGroup::Staged => DiffSource::Staged,
+                ChangeGroup::Unstaged => DiffSource::Unstaged,
+                ChangeGroup::Untracked => DiffSource::Untracked,
+            },
+            paths,
+        })
     }
 
     /// Why a commit can't be made now, for the user; `None` when it can.
@@ -447,6 +517,12 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<(), GitError>,
     },
+    /// Result of `Effect::LoadDiff`.
+    DiffLoaded {
+        repo_id: RepoId,
+        request: DiffRequestId,
+        result: Result<FileDiff, GitError>,
+    },
     /// Result of `Effect::LoadInfo`.
     InfoLoaded {
         repo_id: RepoId,
@@ -492,6 +568,15 @@ pub enum Effect {
         repo_id: RepoId,
         path: PathBuf,
         message: String,
+    },
+    /// Read the Line Diff of one file.
+    LoadDiff {
+        repo_id: RepoId,
+        request: DiffRequestId,
+        path: PathBuf,
+        source: DiffSource,
+        /// The file, or a rename's old path then new path.
+        paths: Vec<String>,
     },
     /// Re-read what HEAD points at (after a commit moved it).
     LoadInfo {
@@ -651,6 +736,26 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     repo.writing = false;
                     repo.committing = false;
                 }
+                // The file shown may have changed along with the list.
+                // shortcut: re-read even when it didn't; one `git diff` per
+                // refresh until file watching (#13) says which files changed.
+                return repo.sync_diff(true).into_iter().collect();
+            }
+            Vec::new()
+        }
+        Msg::DiffLoaded {
+            repo_id,
+            request,
+            result,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && request == repo.diff_request
+                && let Some(diff) = &mut repo.diff
+            {
+                diff.diff = match result {
+                    Ok(loaded) => Loadable::Ready(Arc::new(loaded)),
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
             }
             Vec::new()
         }
@@ -698,6 +803,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                         }
                     }
                 }
+                return repo.sync_diff(false).into_iter().collect();
             }
             Vec::new()
         }

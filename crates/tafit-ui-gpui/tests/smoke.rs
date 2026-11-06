@@ -61,9 +61,8 @@ fn git_environment(version_output: &str) -> GitEnvironment {
 /// Opens a Window showing `state`.
 fn render(state: AppState, cx: &mut TestAppContext) -> &mut VisualTestContext {
     let (store, _events) = AppStore::with_state(Arc::new(GixBackend::default()), state);
-    // No events receiver: the live poller is off under GPUI's test scheduler.
-    let (_view, cx) = cx
-        .add_window_view(|_window, cx| TafitView::new(Arc::new(store), WindowId::FIRST, None, cx));
+    let (_view, cx) =
+        cx.add_window_view(|_window, cx| TafitView::new(Arc::new(store), WindowId::FIRST, cx));
     cx.run_until_parked();
     cx
 }
@@ -314,7 +313,7 @@ fn render_with_store(
     let store = Arc::new(store);
     let view_store = Arc::clone(&store);
     let (_view, cx) =
-        cx.add_window_view(|_window, cx| TafitView::new(view_store, WindowId::FIRST, None, cx));
+        cx.add_window_view(|_window, cx| TafitView::new(view_store, WindowId::FIRST, cx));
     cx.run_until_parked();
     (store, cx)
 }
@@ -428,4 +427,18 @@ fn the_plus_button_shows_the_open_repository_page(cx: &mut TestAppContext) {
         state.window(WindowId::FIRST).expect("the Window").page,
         Page::OpenRepository
     );
+}
+
+#[gpui::test]
+fn the_new_window_button_opens_a_window_in_the_store(cx: &mut TestAppContext) {
+    let (store, cx) = render_with_store(state_with_open_repository(), cx);
+
+    let button = cx
+        .debug_bounds("new-window-button")
+        .expect("drawn")
+        .center();
+    cx.simulate_click(button, Modifiers::none());
+    store.flush();
+
+    assert_eq!(store.snapshot().windows.len(), 2);
 }

@@ -1,6 +1,8 @@
-//! The GPUI host: opens the Window and draws `AppState` snapshots. Holds no
-//! app state of its own; every change goes through the store.
+//! The GPUI host: opens a GPUI window per store Window and draws `AppState`
+//! snapshots. Holds no app state of its own (only which GPUI window shows
+//! which store Window); every change goes through the store.
 
+mod host;
 mod open_repository;
 mod repository_tabs;
 mod status_panel;
@@ -9,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Context, Entity, IntoElement, KeyBinding, Render, SharedString, Subscription,
-    Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, Context, Entity, IntoElement, KeyBinding, Render, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 use tafit_core::{GitEnvironment, GitError, GitVersion, Head};
 use tafit_state::{
@@ -42,7 +44,7 @@ pub fn bind_keys(cx: &mut App) {
 /// Where users get git.
 const GIT_DOWNLOAD_URL: &str = "https://git-scm.com/downloads";
 
-/// Runs the windowed app until the Window is closed.
+/// Runs the windowed app until its last Window is closed.
 pub fn run(store: Arc<AppStore>, events: StoreEvents) {
     application().run(move |cx: &mut App| {
         if let Err(err) = fonts::register(cx) {
@@ -53,20 +55,7 @@ pub fn run(store: Arc<AppStore>, events: StoreEvents) {
             );
         }
         bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some(tafit_base::APP_NAME.into()),
-                    ..Default::default()
-                }),
-                icon: window_icon(),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(|cx| TafitView::new(store, WindowId::FIRST, Some(events), cx)),
-        )
-        .expect("open the main window");
+        host::Host::start(store, events, cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -116,36 +105,14 @@ pub struct TafitView {
     commit_message: Entity<TextState>,
     /// The Repository Tab and commit count the box last took its text from.
     commit_message_source: Option<(RepoId, u64)>,
-    _poller: Option<Task<()>>,
     _commit_message_edits: Subscription,
 }
 
 impl TafitView {
-    /// With `events`, a poller re-reads the snapshot after every store change.
-    /// Pass `None` under GPUI's test scheduler, which can't be woken from
-    /// another thread.
-    pub fn new(
-        store: Arc<AppStore>,
-        window: WindowId,
-        events: Option<StoreEvents>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let poller = events.map(|events| {
-            let store = Arc::clone(&store);
-            cx.spawn(async move |view, cx| {
-                while events.recv().await.is_ok() {
-                    let snapshot = store.snapshot();
-                    let updated = view.update(cx, |view, cx| {
-                        view.state = snapshot;
-                        view.sync_commit_message(cx);
-                        cx.notify();
-                    });
-                    if updated.is_err() {
-                        break; // The view is gone.
-                    }
-                }
-            })
-        });
+    /// Shows the store's `window`, starting from the latest snapshot. The
+    /// app's host hands it each newer one (`set_state`); tests, under GPUI's
+    /// scheduler, which another thread can't wake, keep the first.
+    pub fn new(store: Arc<AppStore>, window: WindowId, cx: &mut Context<Self>) -> Self {
         let commit_message = new_text_state(cx);
         let edits = cx.subscribe(&commit_message, |view, message, _: &TextChanged, cx| {
             if let Some(repo) = view.state.active_in(view.window) {
@@ -163,11 +130,17 @@ impl TafitView {
             theme: Theme::dark(),
             commit_message,
             commit_message_source: None,
-            _poller: poller,
             _commit_message_edits: edits,
         };
         view.sync_commit_message(cx);
         view
+    }
+
+    /// Shows a newer snapshot.
+    pub(crate) fn set_state(&mut self, state: Arc<AppState>, cx: &mut Context<Self>) {
+        self.state = state;
+        self.sync_commit_message(cx);
+        cx.notify();
     }
 
     fn show_page(&self, page: Page) {
@@ -213,6 +186,10 @@ impl Render for TafitView {
             .child(
                 tab_bar_button("+", "open-repository-button", theme)
                     .on_click(cx.listener(|view, _, _, _| view.show_page(Page::OpenRepository))),
+            )
+            .child(
+                tab_bar_button("New Window", "new-window-button", theme)
+                    .on_click(cx.listener(|view, _, _, _| view.store.dispatch(Msg::OpenWindow))),
             )
             .child(
                 tab_bar_button("Settings", "settings-button", theme)

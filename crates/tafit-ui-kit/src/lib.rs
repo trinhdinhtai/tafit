@@ -15,6 +15,7 @@ pub struct Theme {
     pub text_muted: Hsla,
     pub accent: Hsla,
     pub error: Hsla,
+    pub warning: Hsla,
 }
 
 impl Theme {
@@ -27,6 +28,7 @@ impl Theme {
             text_muted: rgb_to_hsla(rgb(0x9da0a8)),
             accent: rgb_to_hsla(rgb(0x3574f0)),
             error: rgb_to_hsla(rgb(0xf75464)),
+            warning: rgb_to_hsla(rgb(0xe5a23b)),
         }
     }
 }
@@ -41,6 +43,24 @@ pub fn tab_bar(theme: &Theme) -> Div {
         .bg(theme.surface)
         .border_b_1()
         .border_color(theme.border)
+}
+
+/// A clickable text button. The caller gives it an id and a click handler.
+pub fn button(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    let hover = theme.border;
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(theme.border)
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover_style(move |style| style.bg(hover))
+        .child(label.into())
 }
 
 /// One tab; the active one is underlined with the accent color.

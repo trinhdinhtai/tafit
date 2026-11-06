@@ -1,0 +1,24 @@
+[package]
+name = "tafit-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = ["ui-gpui"]
+# The windowed app. Without it the crate builds headless, with no GPUI in the
+# dependency graph (checked in CI).
+ui-gpui = ["dep:tafit-ui-gpui"]
+
+[dependencies]
+tafit-base = { workspace = true }
+tafit-core = { workspace = true }
+tafit-git-gix = { workspace = true }
+tafit-state = { workspace = true }
+tafit-ui-gpui = { workspace = true, optional = true }

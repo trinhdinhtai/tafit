@@ -1,0 +1,19 @@
+[package]
+name = "tafit-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+async-channel = { workspace = true }
+tafit-core = { workspace = true }
+
+[dev-dependencies]
+tafit-git-gix = { workspace = true }
+tempfile = { workspace = true }

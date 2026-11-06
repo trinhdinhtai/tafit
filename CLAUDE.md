@@ -11,3 +11,5 @@ Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, 
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+ADRs in `docs/adr/` are written in Vietnamese (solo project). `GLOSSARY.md` definitions are in Vietnamese; term names stay in English.

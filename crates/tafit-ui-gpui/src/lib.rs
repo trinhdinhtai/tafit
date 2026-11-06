@@ -126,7 +126,10 @@ impl Render for TafitView {
                 .child(tab(tab_label(repo), Some(repo.id) == active, theme))
         });
         let settings_button = div().flex().items_center().px(px(8.)).child(
+            // Compact, so it clears the 34 px tab bar by ~5 px above and below.
             button("Settings", theme)
+                .py(px(2.))
+                .text_xs()
                 .id("settings-button")
                 .debug_selector(|| "settings-button".to_owned())
                 .on_click(cx.listener(|view, _, _, _| view.store.dispatch(Msg::OpenSettings))),

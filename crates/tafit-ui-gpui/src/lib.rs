@@ -2,6 +2,7 @@
 //! snapshots. Holds no app state of its own (only which GPUI window shows
 //! which store Window); every change goes through the store.
 
+mod diff_view;
 mod host;
 mod open_repository;
 mod repository_tabs;
@@ -467,13 +468,17 @@ fn repository_tab_body(
                             .child(head_label(&info.head)),
                     ),
             )
-            .child(status_panel::status_panel(
-                repo,
-                store,
-                commit_message,
-                theme,
-                cx,
-            ))
+            .child(
+                // The change list on the left, the selected file's diff beside it.
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().w(px(380.)).flex_none().flex().flex_col().child(
+                        status_panel::status_panel(repo, store, commit_message, theme, cx),
+                    ))
+                    .child(diff_view::diff_view(repo, theme)),
+            )
             .into_any_element(),
     }
 }

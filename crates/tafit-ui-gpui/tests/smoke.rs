@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
 use tafit_core::{
-    ChangeKind, FileChange, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
+    ChangeKind, FileChange, FileDiff, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
     RepositoryStatus,
 };
 use tafit_git_gix::GixBackend;
@@ -441,4 +441,72 @@ fn the_new_window_button_opens_a_window_in_the_store(cx: &mut TestAppContext) {
     store.flush();
 
     assert_eq!(store.snapshot().windows.len(), 2);
+}
+
+/// `state` with `a.txt` unstaged and selected, its diff read as `diff`.
+fn with_diff(diff: FileDiff) -> AppState {
+    let mut state = with_status(
+        state_with_open_repository(),
+        RepositoryStatus {
+            unstaged: vec![change("a.txt", ChangeKind::Modified)],
+            ..RepositoryStatus::default()
+        },
+    );
+    let repo_id = state.active_repo().expect("a Repository is open");
+    let file = FileRef {
+        group: ChangeGroup::Unstaged,
+        path: "a.txt".to_owned(),
+    };
+    let [Effect::LoadDiff { request, .. }] = reduce(
+        &mut state,
+        Msg::Select {
+            repo_id,
+            file,
+            mode: SelectMode::Only,
+        },
+    )[..] else {
+        panic!("selecting one file reads its diff");
+    };
+    reduce(
+        &mut state,
+        Msg::DiffLoaded {
+            repo_id,
+            request,
+            result: Ok(diff),
+        },
+    );
+    state
+}
+
+#[gpui::test]
+fn the_selected_file_shows_its_diff_lines(cx: &mut TestAppContext) {
+    let diff = FileDiff::parse(b"@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n");
+
+    let cx = render(with_diff(diff), cx);
+
+    assert!(cx.debug_bounds("diff-hunk-header").is_some(), "hunk header");
+    assert!(cx.debug_bounds("diff-line").is_some(), "diff lines");
+}
+
+#[gpui::test]
+fn a_binary_file_shows_a_notice_instead_of_lines(cx: &mut TestAppContext) {
+    let cx = render(with_diff(FileDiff::Binary), cx);
+
+    assert!(cx.debug_bounds("diff-binary").is_some(), "binary notice");
+    assert!(cx.debug_bounds("diff-line").is_none(), "no lines");
+}
+
+#[gpui::test]
+fn no_selected_file_shows_no_diff(cx: &mut TestAppContext) {
+    let state = with_status(
+        state_with_open_repository(),
+        RepositoryStatus {
+            unstaged: vec![change("a.txt", ChangeKind::Modified)],
+            ..RepositoryStatus::default()
+        },
+    );
+
+    let cx = render(state, cx);
+
+    assert!(cx.debug_bounds("diff-empty").is_some(), "a hint to select");
 }

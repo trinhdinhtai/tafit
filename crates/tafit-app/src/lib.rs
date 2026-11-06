@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tafit_base::APP_NAME;
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppStore, Msg, StoreEvents};
+use tafit_state::{AppStore, Msg, StoreEvents, WindowId};
 
 /// Entry point of the `tafit` binary.
 pub fn run() -> ExitCode {
@@ -19,7 +19,10 @@ pub fn run() -> ExitCode {
     };
     let (store, events) = AppStore::new(Arc::new(GixBackend::default()));
     store.dispatch(Msg::DetectGit);
-    store.dispatch(Msg::OpenRepo(path));
+    store.dispatch(Msg::OpenRepo {
+        window: WindowId::FIRST,
+        path,
+    });
     run_ui(store, events)
 }
 

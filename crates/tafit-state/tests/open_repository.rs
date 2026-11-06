@@ -4,12 +4,15 @@ use std::path::Path;
 
 use support::{TestDir, TestRepo, TestStore};
 use tafit_core::{Head, RepositoryInfo};
-use tafit_state::{Loadable, Msg};
+use tafit_state::{Loadable, Msg, WindowId};
 
 /// Opens `path` in a fresh store and returns the Repository Tab's settled state.
 fn open(path: &Path) -> Loadable<RepositoryInfo> {
     let store = TestStore::new();
-    store.dispatch(Msg::OpenRepo(path.to_owned()));
+    store.dispatch(Msg::OpenRepo {
+        window: WindowId::FIRST,
+        path: path.to_owned(),
+    });
     let state = store.wait_until(|state| {
         state
             .active()

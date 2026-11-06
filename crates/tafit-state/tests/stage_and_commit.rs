@@ -6,14 +6,21 @@ use std::sync::Arc;
 
 use support::{TestRepo, TestStore};
 use tafit_core::Head;
-use tafit_state::{AppState, ChangeGroup, FileRef, Loadable, Msg, RepoId, RepoState, SelectMode};
+use tafit_state::{
+    AppState, ChangeGroup, FileRef, Loadable, Msg, RepoId, RepoState, SelectMode, WindowId,
+};
 
 /// Opens `repo` in a fresh store once its change list has loaded.
 fn open(repo: &TestRepo) -> (TestStore, RepoId) {
     let store = TestStore::new();
-    store.dispatch(Msg::OpenRepo(repo.path().to_owned()));
+    store.dispatch(Msg::OpenRepo {
+        window: WindowId::FIRST,
+        path: repo.path().to_owned(),
+    });
     let state = store.wait_until(|state| state.active().is_some_and(settled));
-    let repo_id = state.active_repo.expect("the opened Repository is active");
+    let repo_id = state
+        .active_repo()
+        .expect("the opened Repository is active");
     (store, repo_id)
 }
 

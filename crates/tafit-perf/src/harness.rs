@@ -11,7 +11,7 @@ use criterion::{Criterion, Throughput};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tafit_core::RepositoryStatus;
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents};
+use tafit_state::{AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents, WindowId};
 use tempfile::TempDir;
 
 /// Selects the full benchmark set; anything else runs the pull-request set.
@@ -207,7 +207,10 @@ impl Store {
     /// Panics if it fails to open, so a broken benchmark can't look fast.
     pub fn open(&self, path: &Path) -> RepoId {
         let tabs = self.store.snapshot().repos.len();
-        self.store.dispatch(Msg::OpenRepo(path.to_owned()));
+        self.store.dispatch(Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: path.to_owned(),
+        });
         loop {
             // `dispatch` returns before the store has reduced the message, so
             // wait for the new Repository Tab to appear, then to load.

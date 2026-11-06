@@ -11,7 +11,9 @@ use gpui::{
     Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use tafit_core::{GitEnvironment, GitError, GitVersion, Head};
-use tafit_state::{AppState, AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents};
+use tafit_state::{
+    AppState, AppStore, Loadable, Msg, Page, RepoId, RepoState, StoreEvents, WindowId,
+};
 use tafit_ui_kit::text::{TextChanged, TextState, bind_text_keys, new_text_state};
 use tafit_ui_kit::{Theme, button, fonts, tab, tab_bar};
 
@@ -58,7 +60,7 @@ pub fn run(store: Arc<AppStore>, events: StoreEvents) {
                 icon: window_icon(),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| TafitView::new(store, Some(events), cx)),
+            |_window, cx| cx.new(|cx| TafitView::new(store, WindowId::FIRST, Some(events), cx)),
         )
         .expect("open the main window");
         cx.on_window_closed(|cx, _| {
@@ -99,6 +101,8 @@ fn application() -> gpui::Application {
 
 /// The Window's root view: a tab bar of Repository Tabs over the active one.
 pub struct TafitView {
+    /// The store Window this view shows.
+    window: WindowId,
     store: Arc<AppStore>,
     state: Arc<AppState>,
     theme: Theme,
@@ -116,7 +120,12 @@ impl TafitView {
     /// With `events`, a poller re-reads the snapshot after every store change.
     /// Pass `None` under GPUI's test scheduler, which can't be woken from
     /// another thread.
-    pub fn new(store: Arc<AppStore>, events: Option<StoreEvents>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Arc<AppStore>,
+        window: WindowId,
+        events: Option<StoreEvents>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let poller = events.map(|events| {
             let store = Arc::clone(&store);
             cx.spawn(async move |view, cx| {
@@ -135,7 +144,8 @@ impl TafitView {
         });
         let commit_message = new_text_state(cx);
         let edits = cx.subscribe(&commit_message, |view, message, _: &TextChanged, cx| {
-            if let Some(repo_id) = view.state.active_repo {
+            if let Some(repo) = view.state.active_in(view.window) {
+                let repo_id = repo.id;
                 view.store.dispatch(Msg::EditCommitMessage {
                     repo_id,
                     message: message.read(cx).as_str().to_owned(),
@@ -143,6 +153,7 @@ impl TafitView {
             }
         });
         let mut view = Self {
+            window,
             state: store.snapshot(),
             store,
             theme: Theme::dark(),
@@ -155,9 +166,16 @@ impl TafitView {
         view
     }
 
+    fn show_page(&self, page: Page) {
+        self.store.dispatch(Msg::ShowPage {
+            window: self.window,
+            page,
+        });
+    }
+
     /// Shows the Active Repository's message after a tab switch or a commit.
     fn sync_commit_message(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.state.active() else {
+        let Some(repo) = self.state.active_in(self.window) else {
             return;
         };
         let source = Some((repo.id, repo.commits_made));
@@ -178,8 +196,10 @@ impl Render for TafitView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let state = &self.state;
-        let active = state.active_repo;
-        let tabs = state.repos.iter().map(|repo| {
+        let window = state.window(self.window);
+        let active = window.and_then(|window| window.active_repo);
+        let page = window.map_or(Page::RepositoryTab, |window| window.page);
+        let tabs = state.tabs(self.window).map(|repo| {
             div()
                 .debug_selector(|| "repository-tab".to_owned())
                 .h_full()
@@ -192,7 +212,7 @@ impl Render for TafitView {
                 .text_xs()
                 .id("settings-button")
                 .debug_selector(|| "settings-button".to_owned())
-                .on_click(cx.listener(|view, _, _, _| view.store.dispatch(Msg::OpenSettings))),
+                .on_click(cx.listener(|view, _, _, _| view.show_page(Page::Settings))),
         );
         let outdated_git = match &state.git {
             Loadable::Ready(git) if !git.version.is_supported() => {
@@ -200,13 +220,13 @@ impl Render for TafitView {
             }
             _ => None,
         };
-        let body = if state.settings_open {
+        let body = if page == Page::Settings {
             settings_page(state, theme, cx).into_any_element()
         } else if let Loadable::Error(error) = &state.git {
             // Without git nothing can be written, so this blocks the Repository Tab.
             git_unavailable_notice(error, theme).into_any_element()
         } else {
-            match state.active() {
+            match state.active_in(self.window) {
                 Some(repo) => {
                     repository_tab_body(repo, &self.store, &self.commit_message, theme, cx)
                         .into_any_element()
@@ -332,9 +352,11 @@ fn settings_page(state: &AppState, theme: &Theme, cx: &mut Context<TafitView>) -
                 .flex()
                 .items_center()
                 .child(div().flex_1().text_xl().child("Settings"))
-                .child(button("Close", theme).id("close-settings").on_click(
-                    cx.listener(|view, _, _, _| view.store.dispatch(Msg::CloseSettings)),
-                )),
+                .child(
+                    button("Close", theme)
+                        .id("close-settings")
+                        .on_click(cx.listener(|view, _, _, _| view.show_page(Page::RepositoryTab))),
+                ),
         )
         .child(
             div()

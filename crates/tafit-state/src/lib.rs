@@ -5,7 +5,7 @@
 mod store;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
@@ -207,37 +207,186 @@ impl RepoState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct AppState {
-    /// Open Repositories, in Repository Tab order.
-    pub repos: Vec<RepoState>,
+/// Identifies one Window for the lifetime of the store; never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowId(u64);
+
+impl WindowId {
+    /// The Window a default `AppState` starts with.
+    pub const FIRST: Self = Self(0);
+}
+
+/// What a Window shows below its tab bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Page {
+    /// The Active Repository's Repository Tab.
+    #[default]
+    RepositoryTab,
+    /// Open a Repository: a folder picker and the pinned and recent ones.
+    OpenRepository,
+    Settings,
+}
+
+/// One Window and its group of Repository Tabs.
+#[derive(Clone, Debug)]
+pub struct WindowState {
+    pub id: WindowId,
+    /// The Window's Repository Tabs, in tab order.
+    pub tabs: Vec<RepoId>,
+    /// One of `tabs`; `None` only when there are none.
     pub active_repo: Option<RepoId>,
+    pub page: Page,
+    /// Grows each time the Window should come to the front: a Repository
+    /// opened from another Window already has its tab here.
+    pub raise_requests: u64,
+}
+
+impl WindowState {
+    fn new(id: WindowId) -> Self {
+        Self {
+            id,
+            tabs: Vec::new(),
+            active_repo: None,
+            page: Page::RepositoryTab,
+            raise_requests: 0,
+        }
+    }
+}
+
+/// How many recent Repositories are remembered.
+pub const RECENT_LIMIT: usize = 10;
+
+#[derive(Clone, Debug)]
+pub struct AppState {
+    /// Every open Repository, whichever Window its tab is in. Tab order is
+    /// `WindowState::tabs`.
+    pub repos: Vec<RepoState>,
+    /// Open Windows, oldest first. Starts with `WindowId::FIRST`.
+    pub windows: Vec<WindowState>,
+    /// The Window the user last worked in.
+    pub focused_window: Option<WindowId>,
+    /// Repositories opened successfully, most recent first, at most
+    /// `RECENT_LIMIT`.
+    pub recent: Vec<PathBuf>,
+    /// Repositories the user pinned, in pin order; listed before `recent`.
+    // shortcut: `recent` and `pinned` live only as long as the app runs;
+    // the Session (#22) will keep them between runs.
+    pub pinned: Vec<PathBuf>,
     /// The system git, found at startup (`Msg::DetectGit`). An error means git
     /// could not be run at all; `GitError::GitNotFound` means it isn't installed.
     pub git: Loadable<GitEnvironment, GitError>,
     /// The latest `Msg::DetectGit`; only its result is kept.
     git_request: GitRequestId,
-    /// Whether the settings page is shown in place of the Repository Tab.
-    pub settings_open: bool,
     next_repo_id: u64,
+    next_window_id: u64,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            windows: vec![WindowState::new(WindowId::FIRST)],
+            focused_window: Some(WindowId::FIRST),
+            recent: Vec::new(),
+            pinned: Vec::new(),
+            git: Loadable::default(),
+            git_request: GitRequestId::default(),
+            next_repo_id: 0,
+            next_window_id: WindowId::FIRST.0 + 1,
+        }
+    }
 }
 
 impl AppState {
-    /// The Active Repository's state.
+    /// The focused Window's Active Repository.
     pub fn active(&self) -> Option<&RepoState> {
-        let id = self.active_repo?;
+        self.active_in(self.focused_window?)
+    }
+
+    /// The id of the focused Window's Active Repository.
+    pub fn active_repo(&self) -> Option<RepoId> {
+        self.active().map(|repo| repo.id)
+    }
+
+    /// `window`'s Active Repository.
+    pub fn active_in(&self, window: WindowId) -> Option<&RepoState> {
+        self.repo(self.window(window)?.active_repo?)
+    }
+
+    pub fn window(&self, id: WindowId) -> Option<&WindowState> {
+        self.windows.iter().find(|window| window.id == id)
+    }
+
+    pub fn repo(&self, id: RepoId) -> Option<&RepoState> {
         self.repos.iter().find(|repo| repo.id == id)
+    }
+
+    /// `window`'s Repository Tabs, in tab order.
+    pub fn tabs(&self, window: WindowId) -> impl Iterator<Item = &RepoState> {
+        self.window(window)
+            .into_iter()
+            .flat_map(|window| &window.tabs)
+            .filter_map(|&id| self.repo(id))
+    }
+
+    /// The Repositories to offer for opening: the pinned ones first (`true`),
+    /// then the recent ones that aren't pinned.
+    pub fn repository_list(&self) -> impl Iterator<Item = (&Path, bool)> {
+        let pinned = self.pinned.iter().map(|path| (path.as_path(), true));
+        let recent = self
+            .recent
+            .iter()
+            .filter(|path| !self.pinned.contains(path))
+            .map(|path| (path.as_path(), false));
+        pinned.chain(recent)
     }
 
     fn repo_mut(&mut self, id: RepoId) -> Option<&mut RepoState> {
         self.repos.iter_mut().find(|repo| repo.id == id)
     }
+
+    fn window_mut(&mut self, id: WindowId) -> Option<&mut WindowState> {
+        self.windows.iter_mut().find(|window| window.id == id)
+    }
+
+    /// The Window holding `repo`'s tab.
+    fn window_of_mut(&mut self, repo: RepoId) -> Option<&mut WindowState> {
+        self.windows
+            .iter_mut()
+            .find(|window| window.tabs.contains(&repo))
+    }
 }
 
 #[derive(Debug)]
 pub enum Msg {
-    /// Open the Repository at this path in a new Repository Tab and make it active.
-    OpenRepo(PathBuf),
+    /// Open the Repository at `path` in a new Repository Tab of `window` and
+    /// make it active there. A Repository already open anywhere gets no
+    /// second tab: its tab is made active and its Window brought forward.
+    OpenRepo {
+        window: WindowId,
+        path: PathBuf,
+    },
+    /// Select this Repository's tab, making it its Window's Active Repository
+    /// and that Window the focused one.
+    ActivateRepo(RepoId),
+    /// Close this Repository's tab, and with it the Repository. Closing the
+    /// active tab activates the one after it, or else the one before.
+    CloseRepo(RepoId),
+    /// Move this Repository's tab to index `to` of its Window's tabs, as
+    /// counted once it is taken out; past the end means last.
+    MoveTab {
+        repo_id: RepoId,
+        to: usize,
+    },
+    /// Open a new, empty Window and focus it.
+    OpenWindow,
+    /// Close this Window and the Repositories in its tabs.
+    CloseWindow(WindowId),
+    /// The user started working in this Window.
+    FocusWindow(WindowId),
+    /// Keep this Repository at the top of the Repository list.
+    PinRepo(PathBuf),
+    UnpinRepo(PathBuf),
     /// Result of `Effect::OpenRepo`.
     RepoOpened {
         repo_id: RepoId,
@@ -258,8 +407,11 @@ pub enum Msg {
         request: GitRequestId,
         result: Result<GitEnvironment, GitError>,
     },
-    OpenSettings,
-    CloseSettings,
+    /// Show `page` in `window`.
+    ShowPage {
+        window: WindowId,
+        page: Page,
+    },
     /// Change which rows of the change list are selected.
     Select {
         repo_id: RepoId,
@@ -302,6 +454,11 @@ pub enum Effect {
         repo_id: RepoId,
         path: PathBuf,
     },
+    /// The Repository closed: stop its running reads, whose results the
+    /// reducer would drop anyway.
+    CloseRepo {
+        repo_id: RepoId,
+    },
     DetectGit {
         request: GitRequestId,
     },
@@ -340,12 +497,101 @@ pub enum Effect {
 /// can drive an `AppState` directly and inspect the effects it asks for.
 pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     match msg {
-        Msg::OpenRepo(path) => {
+        Msg::OpenRepo { window, path } => {
+            if let Some(open) = state.repos.iter().find(|repo| repo.path == path) {
+                let repo_id = open.id;
+                if let Some(window_with_tab) = state.window_of_mut(repo_id) {
+                    window_with_tab.active_repo = Some(repo_id);
+                    window_with_tab.page = Page::RepositoryTab;
+                    if window_with_tab.id != window {
+                        window_with_tab.raise_requests += 1;
+                    }
+                    state.focused_window = Some(window_with_tab.id);
+                }
+                return Vec::new();
+            }
             let repo_id = RepoId(state.next_repo_id);
+            let Some(target) = state.window_mut(window) else {
+                return Vec::new();
+            };
+            target.tabs.push(repo_id);
+            target.active_repo = Some(repo_id);
+            target.page = Page::RepositoryTab;
             state.next_repo_id += 1;
             state.repos.push(RepoState::new(repo_id, path.clone()));
-            state.active_repo = Some(repo_id);
             vec![Effect::OpenRepo { repo_id, path }]
+        }
+        Msg::ActivateRepo(repo_id) => {
+            if let Some(window) = state.window_of_mut(repo_id) {
+                window.active_repo = Some(repo_id);
+                window.page = Page::RepositoryTab;
+                let id = window.id;
+                state.focused_window = Some(id);
+            }
+            Vec::new()
+        }
+        Msg::CloseRepo(repo_id) => {
+            let Some(window) = state.window_of_mut(repo_id) else {
+                return Vec::new();
+            };
+            let ix = window
+                .tabs
+                .iter()
+                .position(|&id| id == repo_id)
+                .expect("the Window holds the tab");
+            window.tabs.remove(ix);
+            if window.active_repo == Some(repo_id) {
+                let next = ix.min(window.tabs.len().saturating_sub(1));
+                window.active_repo = window.tabs.get(next).copied();
+            }
+            state.repos.retain(|repo| repo.id != repo_id);
+            vec![Effect::CloseRepo { repo_id }]
+        }
+        Msg::MoveTab { repo_id, to } => {
+            if let Some(window) = state.window_of_mut(repo_id) {
+                window.tabs.retain(|&id| id != repo_id);
+                let to = to.min(window.tabs.len());
+                window.tabs.insert(to, repo_id);
+            }
+            Vec::new()
+        }
+        Msg::OpenWindow => {
+            let id = WindowId(state.next_window_id);
+            state.next_window_id += 1;
+            state.windows.push(WindowState::new(id));
+            state.focused_window = Some(id);
+            Vec::new()
+        }
+        Msg::CloseWindow(id) => {
+            let Some(ix) = state.windows.iter().position(|window| window.id == id) else {
+                return Vec::new();
+            };
+            let window = state.windows.remove(ix);
+            state.repos.retain(|repo| !window.tabs.contains(&repo.id));
+            if state.focused_window == Some(id) {
+                state.focused_window = state.windows.last().map(|window| window.id);
+            }
+            window
+                .tabs
+                .into_iter()
+                .map(|repo_id| Effect::CloseRepo { repo_id })
+                .collect()
+        }
+        Msg::FocusWindow(id) => {
+            if state.window(id).is_some() {
+                state.focused_window = Some(id);
+            }
+            Vec::new()
+        }
+        Msg::PinRepo(path) => {
+            if !state.pinned.contains(&path) {
+                state.pinned.push(path);
+            }
+            Vec::new()
+        }
+        Msg::UnpinRepo(path) => {
+            state.pinned.retain(|pinned| *pinned != path);
+            Vec::new()
         }
         Msg::RepoOpened { repo_id, result } => {
             // A Repository closed while loading has no state left; drop the result.
@@ -355,7 +601,12 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             match result {
                 Ok(info) => {
                     repo.open = Loadable::Ready(info);
-                    vec![repo.request_status()]
+                    let effect = repo.request_status();
+                    let path = repo.path.clone();
+                    state.recent.retain(|recent| *recent != path);
+                    state.recent.insert(0, path);
+                    state.recent.truncate(RECENT_LIMIT);
+                    vec![effect]
                 }
                 Err(err) => {
                     repo.open = Loadable::Error(err.to_string());
@@ -417,12 +668,10 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
-        Msg::OpenSettings => {
-            state.settings_open = true;
-            Vec::new()
-        }
-        Msg::CloseSettings => {
-            state.settings_open = false;
+        Msg::ShowPage { window, page } => {
+            if let Some(window) = state.window_mut(window) {
+                window.page = page;
+            }
             Vec::new()
         }
         Msg::Select {

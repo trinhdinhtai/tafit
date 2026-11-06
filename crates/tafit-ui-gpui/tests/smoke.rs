@@ -10,14 +10,22 @@ use tafit_core::{
     RepositoryStatus,
 };
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, SelectMode, reduce};
+use tafit_state::{
+    AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, Page, SelectMode, WindowId, reduce,
+};
 use tafit_ui_gpui::TafitView;
 
 /// A snapshot with one opened Repository, built with the synchronous reducer.
 fn state_with_open_repository() -> AppState {
     let mut state = AppState::default();
-    reduce(&mut state, Msg::OpenRepo(PathBuf::from("/work/my-repo")));
-    let repo_id = state.active_repo.expect("OpenRepo activates the new tab");
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from("/work/my-repo"),
+        },
+    );
+    let repo_id = state.active_repo().expect("OpenRepo activates the new tab");
     reduce(
         &mut state,
         Msg::RepoOpened {
@@ -53,7 +61,8 @@ fn git_environment(version_output: &str) -> GitEnvironment {
 fn render(state: AppState, cx: &mut TestAppContext) -> &mut VisualTestContext {
     let (store, _events) = AppStore::with_state(Arc::new(GixBackend::default()), state);
     // No events receiver: the live poller is off under GPUI's test scheduler.
-    let (_view, cx) = cx.add_window_view(|_window, cx| TafitView::new(Arc::new(store), None, cx));
+    let (_view, cx) = cx
+        .add_window_view(|_window, cx| TafitView::new(Arc::new(store), WindowId::FIRST, None, cx));
     cx.run_until_parked();
     cx
 }
@@ -133,7 +142,13 @@ fn the_settings_page_shows_the_programs_found(cx: &mut TestAppContext) {
         state_with_open_repository(),
         Ok(git_environment("git version 2.53.0.windows.2")),
     );
-    reduce(&mut state, Msg::OpenSettings);
+    reduce(
+        &mut state,
+        Msg::ShowPage {
+            window: WindowId::FIRST,
+            page: Page::Settings,
+        },
+    );
 
     let cx = render(state, cx);
 
@@ -154,7 +169,7 @@ fn the_settings_page_shows_the_programs_found(cx: &mut TestAppContext) {
 
 /// `state`'s Active Repository after its status read reported `status`.
 fn with_status(mut state: AppState, status: RepositoryStatus) -> AppState {
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     let [Effect::LoadStatus { request, .. }] = reduce(&mut state, Msg::RefreshStatus(repo_id))[..]
     else {
         panic!("RefreshStatus asks for one status read");
@@ -229,7 +244,7 @@ fn ready_to_commit(message: &str) -> AppState {
             ..RepositoryStatus::default()
         },
     );
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     reduce(
         &mut state,
         Msg::Select {
@@ -278,7 +293,7 @@ fn without_a_message_the_commit_button_is_disabled(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_commit_shows_why(cx: &mut TestAppContext) {
     let mut state = with_status(state_with_open_repository(), RepositoryStatus::default());
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     reduce(&mut state, Msg::Commit(repo_id));
 
     let cx = render(state, cx);

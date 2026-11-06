@@ -4,7 +4,7 @@
 pub mod fonts;
 pub mod text;
 
-use gpui::{Div, Hsla, IntoElement, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
+use gpui::{Div, Hsla, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
 
 /// Color tokens. Widgets read colors from here, never from literals.
 #[derive(Clone, Copy, Debug)]
@@ -82,12 +82,34 @@ pub fn disabled_button(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .child(label.into())
 }
 
-/// One tab; the active one is underlined with the accent color.
-pub fn tab(label: impl Into<SharedString>, active: bool, theme: &Theme) -> impl IntoElement {
+/// A small "×" that closes what it sits on, e.g. a `tab`. The caller gives
+/// it an id and a click handler.
+pub fn close_button(theme: &Theme) -> Div {
+    let hover = theme.border;
     div()
         .flex()
+        .flex_none()
         .items_center()
-        .px(px(14.))
+        .justify_center()
+        .size(px(16.))
+        .rounded(px(3.))
+        .text_xs()
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover_style(move |style| style.bg(hover))
+        .child("×")
+}
+
+/// One tab; the active one is underlined with the accent color. Children
+/// added by the caller, such as a `close_button`, follow the label.
+pub fn tab(label: impl Into<SharedString>, active: bool, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.))
+        .pl(px(14.))
+        .pr(px(8.))
         .h_full()
         .border_b_2()
         .border_color(if active {

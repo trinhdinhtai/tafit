@@ -9,11 +9,18 @@ use gpui::{
 };
 use tafit_core::Head;
 use tafit_state::{AppState, AppStore, Loadable, RepoState, StoreEvents};
-use tafit_ui_kit::{Theme, tab, tab_bar};
+use tafit_ui_kit::{Theme, fonts, tab, tab_bar};
 
 /// Runs the windowed app until the Window is closed.
 pub fn run(store: Arc<AppStore>, events: StoreEvents) {
     application().run(move |cx: &mut App| {
+        if let Err(err) = fonts::register(cx) {
+            // Still usable: text falls back to the system's fonts.
+            eprintln!(
+                "{}: could not load bundled fonts: {err:#}",
+                tafit_base::APP_NAME
+            );
+        }
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
             WindowOptions {
@@ -107,6 +114,7 @@ impl Render for TafitView {
             .flex()
             .flex_col()
             .bg(theme.background)
+            .font_family(fonts::UI_FONT_FAMILY)
             .text_color(theme.text)
             .text_sm()
             .child(tab_bar(theme).children(tabs))

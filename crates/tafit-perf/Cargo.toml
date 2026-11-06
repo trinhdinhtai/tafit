@@ -22,3 +22,7 @@ workspace = true
 [[bench]]
 name = "open_repository"
 harness = false
+
+[[bench]]
+name = "idle"
+harness = false

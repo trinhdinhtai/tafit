@@ -29,6 +29,7 @@ pub fn run(store: Arc<AppStore>, events: StoreEvents) {
                     title: Some(tafit_base::APP_NAME.into()),
                     ..Default::default()
                 }),
+                icon: window_icon(),
                 ..Default::default()
             },
             |_window, cx| cx.new(|cx| TafitView::new(store, Some(events), cx)),
@@ -42,6 +43,18 @@ pub fn run(store: Arc<AppStore>, events: StoreEvents) {
         .detach();
         cx.activate(true);
     });
+}
+
+/// The window icon. Only Linux reads it from here; Windows ignores it and
+/// takes the exe's icon resource, macOS the app bundle's icon.
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/tafit-window-icon.png"
+    ));
+    // A missing icon is cosmetic; never fail startup over it.
+    let icon = image::load_from_memory_with_format(PNG, image::ImageFormat::Png).ok()?;
+    Some(Arc::new(icon.into_rgba8()))
 }
 
 #[cfg(target_os = "windows")]
@@ -181,4 +194,13 @@ fn centered_message(text: impl Into<SharedString>, color: gpui::Hsla) -> impl In
         .justify_center()
         .text_color(color)
         .child(text.into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_window_icon_decodes() {
+        let icon = super::window_icon().expect("the window icon decodes");
+        assert_eq!(icon.dimensions(), (32, 32));
+    }
 }

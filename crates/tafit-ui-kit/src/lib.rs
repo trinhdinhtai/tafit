@@ -16,6 +16,8 @@ pub struct Theme {
     pub accent: Hsla,
     pub error: Hsla,
     pub warning: Hsla,
+    /// Additions, e.g. an added file in the change list.
+    pub success: Hsla,
 }
 
 impl Theme {
@@ -29,6 +31,7 @@ impl Theme {
             accent: rgb_to_hsla(rgb(0x3574f0)),
             error: rgb_to_hsla(rgb(0xf75464)),
             warning: rgb_to_hsla(rgb(0xe5a23b)),
+            success: rgb_to_hsla(rgb(0x5fb865)),
         }
     }
 }

@@ -1,6 +1,8 @@
 //! The GPUI host: opens the Window and draws `AppState` snapshots. Holds no
 //! app state of its own; every change goes through the store.
 
+mod status_panel;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -124,7 +126,10 @@ impl Render for TafitView {
                 .child(tab(tab_label(repo), Some(repo.id) == active, theme))
         });
         let settings_button = div().flex().items_center().px(px(8.)).child(
+            // Compact, so it clears the 34 px tab bar by ~5 px above and below.
             button("Settings", theme)
+                .py(px(2.))
+                .text_xs()
                 .id("settings-button")
                 .debug_selector(|| "settings-button".to_owned())
                 .on_click(cx.listener(|view, _, _, _| view.store.dispatch(Msg::OpenSettings))),
@@ -142,7 +147,7 @@ impl Render for TafitView {
             git_unavailable_notice(error, theme).into_any_element()
         } else {
             match state.active() {
-                Some(repo) => repository_tab_body(repo, theme).into_any_element(),
+                Some(repo) => repository_tab_body(repo, theme, cx).into_any_element(),
                 None => centered_message("No Repository open", theme.text_muted).into_any_element(),
             }
         };
@@ -373,7 +378,11 @@ fn tab_label(repo: &RepoState) -> SharedString {
     }
 }
 
-fn repository_tab_body(repo: &RepoState, theme: &Theme) -> impl IntoElement {
+fn repository_tab_body(
+    repo: &RepoState,
+    theme: &Theme,
+    cx: &mut Context<TafitView>,
+) -> impl IntoElement {
     match &repo.open {
         Loadable::Loading => centered_message("Opening…", theme.text_muted).into_any_element(),
         Loadable::Error(message) => div()
@@ -384,20 +393,29 @@ fn repository_tab_body(repo: &RepoState, theme: &Theme) -> impl IntoElement {
         Loadable::Ready(info) => div()
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .p(px(24.))
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
-                    .debug_selector(|| "repository-name".to_owned())
-                    .text_xl()
-                    .child(info.name.clone()),
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .gap(px(6.))
+                    .p(px(24.))
+                    .child(
+                        div()
+                            .debug_selector(|| "repository-name".to_owned())
+                            .text_xl()
+                            .child(info.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "repository-head".to_owned())
+                            .text_color(theme.text_muted)
+                            .child(head_label(&info.head)),
+                    ),
             )
-            .child(
-                div()
-                    .debug_selector(|| "repository-head".to_owned())
-                    .text_color(theme.text_muted)
-                    .child(head_label(&info.head)),
-            )
+            .child(status_panel::status_panel(repo, theme, cx))
             .into_any_element(),
     }
 }

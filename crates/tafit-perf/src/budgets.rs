@@ -20,6 +20,14 @@ pub const BUDGETS: &[Budget] = &[
         limit: Limit::Time(Duration::from_millis(650)),
         suite: Suite::Pr,
     },
+    // One refresh of an 80,000-file Repository with changes. About 270 ms on
+    // a Windows dev machine; tighten once CI's numbers settle. The nightly
+    // snapshots run unbudgeted until they have a few nights of results.
+    Budget {
+        benchmark: "status/80k_files",
+        limit: Limit::Time(Duration::from_millis(400)),
+        suite: Suite::Pr,
+    },
     Budget {
         benchmark: "idle_cpu/1_repo",
         limit: Limit::CpuShare {

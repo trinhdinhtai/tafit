@@ -23,6 +23,46 @@ pub struct RepositoryInfo {
     pub head: Head,
 }
 
+/// How one file changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    /// Content, mode or type changed; also a conflicted file.
+    Modified,
+    Deleted,
+    /// Moved from `from` (a repo-relative path) to the change's `path`.
+    Renamed {
+        from: String,
+    },
+}
+
+/// One file in the change list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChange {
+    /// Repo-relative, with `/` separators. An untracked directory shown as a
+    /// whole ends in `/`.
+    pub path: String,
+    pub kind: ChangeKind,
+}
+
+/// A Repository's changes, each group sorted by path. A file staged in part
+/// is in both `staged` and `unstaged`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepositoryStatus {
+    /// HEAD's tree against the index.
+    pub staged: Vec<FileChange>,
+    /// The index against the work tree.
+    pub unstaged: Vec<FileChange>,
+    /// Files git doesn't track and doesn't ignore; always `ChangeKind::Added`.
+    pub untracked: Vec<FileChange>,
+}
+
+impl RepositoryStatus {
+    pub fn is_clean(&self) -> bool {
+        self.staged.is_empty() && self.unstaged.is_empty() && self.untracked.is_empty()
+    }
+}
+
 /// A git version, as printed by `git --version`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitVersion {
@@ -141,6 +181,11 @@ impl CancellationToken {
         self.0.load(Ordering::Relaxed)
     }
 
+    /// The underlying flag, for libraries that poll an `AtomicBool` themselves.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+
     /// `Err(GitError::Cancelled)` once cancelled, for use with `?`.
     pub fn check(&self) -> Result<(), GitError> {
         if self.is_cancelled() {
@@ -167,4 +212,8 @@ pub trait GitBackend: Send + Sync {
 /// An open Repository. Read methods take a `CancellationToken`.
 pub trait GitRepository: Send + Sync {
     fn info(&self, cancel: &CancellationToken) -> Result<RepositoryInfo, GitError>;
+
+    /// The change list: staged, unstaged and untracked files. Empty for a
+    /// bare Repository, which has no work tree.
+    fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError>;
 }

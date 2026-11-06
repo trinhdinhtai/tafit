@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{TestAppContext, VisualTestContext};
-use tafit_core::{GitEnvironment, GitError, GitVersion, Head, RepositoryInfo};
+use tafit_core::{
+    ChangeKind, FileChange, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
+    RepositoryStatus,
+};
 use tafit_git_gix::GixBackend;
 use tafit_state::{AppState, AppStore, Effect, Msg, reduce};
 use tafit_ui_gpui::TafitView;
@@ -147,4 +150,71 @@ fn the_settings_page_shows_the_programs_found(cx: &mut TestAppContext) {
         cx.debug_bounds("git-outdated-notice").is_none(),
         "2.53 is supported"
     );
+}
+
+/// `state`'s Active Repository after its status read reported `status`.
+fn with_status(mut state: AppState, status: RepositoryStatus) -> AppState {
+    let repo_id = state.active_repo.expect("a Repository is open");
+    let [Effect::LoadStatus { request, .. }] = reduce(&mut state, Msg::RefreshStatus(repo_id))[..]
+    else {
+        panic!("RefreshStatus asks for one status read");
+    };
+    reduce(
+        &mut state,
+        Msg::StatusLoaded {
+            repo_id,
+            request,
+            result: Ok(status),
+        },
+    );
+    state
+}
+
+fn change(path: &str, kind: ChangeKind) -> FileChange {
+    FileChange {
+        path: path.to_owned(),
+        kind,
+    }
+}
+
+#[gpui::test]
+fn the_change_list_shows_its_three_groups(cx: &mut TestAppContext) {
+    let status = RepositoryStatus {
+        staged: vec![change(
+            "src/new.rs",
+            ChangeKind::Renamed {
+                from: "src/old.rs".to_owned(),
+            },
+        )],
+        unstaged: vec![
+            change("README.md", ChangeKind::Modified),
+            change("gone.txt", ChangeKind::Deleted),
+        ],
+        untracked: vec![change("notes/", ChangeKind::Added)],
+    };
+
+    let cx = render(with_status(state_with_open_repository(), status), cx);
+
+    assert!(cx.debug_bounds("status-panel").is_some(), "change list");
+    assert!(
+        cx.debug_bounds("status-refresh").is_some(),
+        "refresh button"
+    );
+    for group in ["status-staged", "status-unstaged", "status-untracked"] {
+        assert!(cx.debug_bounds(group).is_some(), "{group} header");
+    }
+    assert!(cx.debug_bounds("status-row").is_some(), "file rows");
+}
+
+#[gpui::test]
+fn a_clean_repository_says_there_are_no_changes(cx: &mut TestAppContext) {
+    let state = with_status(state_with_open_repository(), RepositoryStatus::default());
+
+    let cx = render(state, cx);
+
+    assert!(
+        cx.debug_bounds("status-clean").is_some(),
+        "no-changes message"
+    );
+    assert!(cx.debug_bounds("status-row").is_none(), "no file rows");
 }

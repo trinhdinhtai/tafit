@@ -1,6 +1,7 @@
 //! The GPUI host: opens the Window and draws `AppState` snapshots. Holds no
 //! app state of its own; every change goes through the store.
 
+mod open_repository;
 mod repository_tabs;
 mod status_panel;
 
@@ -203,28 +204,41 @@ impl Render for TafitView {
             .window(self.window)
             .map_or(Page::RepositoryTab, |window| window.page);
         let tabs = repository_tabs::repository_tabs(state, self.window, theme, cx);
-        let settings_button = div().flex().flex_none().items_center().px(px(8.)).child(
-            tab_bar_button("Settings", "settings-button", theme)
-                .on_click(cx.listener(|view, _, _, _| view.show_page(Page::Settings))),
-        );
+        let buttons = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .child(
+                tab_bar_button("+", "open-repository-button", theme)
+                    .on_click(cx.listener(|view, _, _, _| view.show_page(Page::OpenRepository))),
+            )
+            .child(
+                tab_bar_button("Settings", "settings-button", theme)
+                    .on_click(cx.listener(|view, _, _, _| view.show_page(Page::Settings))),
+            );
         let outdated_git = match &state.git {
             Loadable::Ready(git) if !git.version.is_supported() => {
                 Some(outdated_git_banner(&git.version, theme))
             }
             _ => None,
         };
-        let body = if page == Page::Settings {
-            settings_page(state, theme, cx).into_any_element()
-        } else if let Loadable::Error(error) = &state.git {
-            // Without git nothing can be written, so this blocks the Repository Tab.
-            git_unavailable_notice(error, theme).into_any_element()
-        } else {
-            match state.active_in(self.window) {
-                Some(repo) => {
-                    repository_tab_body(repo, &self.store, &self.commit_message, theme, cx)
-                        .into_any_element()
-                }
-                None => centered_message("No Repository open", theme.text_muted).into_any_element(),
+        // With no Repository Tab, the Window offers to open one.
+        let active = state
+            .active_in(self.window)
+            .filter(|_| page == Page::RepositoryTab);
+        let body = match (page, active) {
+            (Page::Settings, _) => settings_page(state, theme, cx).into_any_element(),
+            // Without git nothing can be written, so this blocks the Window.
+            _ if let Loadable::Error(error) = &state.git => {
+                git_unavailable_notice(error, theme).into_any_element()
+            }
+            (_, None) => open_repository::open_repository_page(state, self.window, theme, cx)
+                .into_any_element(),
+            (_, Some(repo)) => {
+                repository_tab_body(repo, &self.store, &self.commit_message, theme, cx)
+                    .into_any_element()
             }
         };
         div()
@@ -235,7 +249,7 @@ impl Render for TafitView {
             .font_family(fonts::UI_FONT_FAMILY)
             .text_color(theme.text)
             .text_sm()
-            .child(tab_bar(theme).child(tabs).child(settings_button))
+            .child(tab_bar(theme).child(tabs).child(buttons))
             .children(outdated_git)
             .child(body)
     }

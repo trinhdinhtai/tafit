@@ -1,5 +1,6 @@
-//! GPUI smoke tests: a Window renders a Repository Tab, the git notices and
-//! the settings page. Logic is tested through the store (tafit-state), not here.
+//! GPUI smoke tests: a Window renders Repository Tabs, the Open Repository
+//! page, the git notices and the settings page, and clicks reach the store.
+//! Logic is tested through the store (tafit-state), not here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -361,5 +362,70 @@ fn clicking_a_tab_selects_it_and_a_middle_click_closes_it(cx: &mut TestAppContex
             .map(|repo| repo.id)
             .collect::<Vec<_>>(),
         [first]
+    );
+}
+
+#[gpui::test]
+fn a_window_without_tabs_offers_the_pinned_and_recent_repositories(cx: &mut TestAppContext) {
+    let mut state = state_with_open_repository();
+    let repo_id = state.active_repo().expect("a Repository is open");
+    reduce(&mut state, Msg::PinRepo(PathBuf::from("/work/pinned")));
+    reduce(&mut state, Msg::CloseRepo(repo_id));
+
+    let (store, cx) = render_with_store(state, cx);
+
+    assert!(
+        cx.debug_bounds("open-repository-page").is_some(),
+        "the page"
+    );
+    assert!(cx.debug_bounds("open-folder").is_some(), "folder picker");
+    assert!(
+        cx.debug_bounds("unpin-repository").is_some(),
+        "the pinned one"
+    );
+    assert!(
+        cx.debug_bounds("pin-repository").is_some(),
+        "the recent one"
+    );
+
+    let pin = cx.debug_bounds("pin-repository").expect("drawn").center();
+    cx.simulate_click(pin, Modifiers::none());
+    store.flush();
+    assert_eq!(
+        store.snapshot().pinned,
+        [
+            PathBuf::from("/work/pinned"),
+            PathBuf::from("/work/my-repo")
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_missing_git_is_shown_even_without_a_repository_tab(cx: &mut TestAppContext) {
+    let state = with_git(
+        AppState::default(),
+        Err(GitError::GitNotFound("no `git` on PATH".to_owned())),
+    );
+
+    let cx = render(state, cx);
+
+    assert!(cx.debug_bounds("git-missing-notice").is_some(), "notice");
+}
+
+#[gpui::test]
+fn the_plus_button_shows_the_open_repository_page(cx: &mut TestAppContext) {
+    let (store, cx) = render_with_store(state_with_open_repository(), cx);
+
+    let plus = cx
+        .debug_bounds("open-repository-button")
+        .expect("drawn")
+        .center();
+    cx.simulate_click(plus, Modifiers::none());
+    store.flush();
+
+    let state = store.snapshot();
+    assert_eq!(
+        state.window(WindowId::FIRST).expect("the Window").page,
+        Page::OpenRepository
     );
 }

@@ -18,3 +18,7 @@ tempfile = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "open_repository"
+harness = false

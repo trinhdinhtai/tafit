@@ -243,7 +243,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<T> {
 }
 
 fn format_time(nanos: f64) -> String {
-    format!("{:.1} ms", nanos / 1_000_000.0)
+    if nanos < 1_000_000.0 {
+        format!("{:.1} µs", nanos / 1_000.0)
+    } else {
+        format!("{:.1} ms", nanos / 1_000_000.0)
+    }
 }
 
 impl fmt::Display for Report {

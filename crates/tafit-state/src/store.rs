@@ -18,6 +18,8 @@ pub type StoreEvents = async_channel::Receiver<StoreEvent>;
 
 enum Command {
     Msg(Msg),
+    /// Answered once every command before it has been handled.
+    Flush(mpsc::Sender<()>),
     Shutdown,
 }
 
@@ -59,6 +61,15 @@ impl AppStore {
         let _ = self.commands.send(Command::Msg(msg));
     }
 
+    /// Blocks until every `Msg` dispatched before it has been reduced and its
+    /// snapshot published; the effects it asked for may still be running.
+    pub fn flush(&self) {
+        let (done, wait) = mpsc::channel();
+        if self.commands.send(Command::Flush(done)).is_ok() {
+            let _ = wait.recv();
+        }
+    }
+
     /// The latest published state. Cheap: a read lock and an `Arc` clone.
     pub fn snapshot(&self) -> Arc<AppState> {
         read(&self.state)
@@ -88,7 +99,15 @@ struct StoreWorker {
 impl StoreWorker {
     fn run(mut self, commands: mpsc::Receiver<Command>) {
         let mut current = read(&self.state);
-        while let Ok(Command::Msg(msg)) = commands.recv() {
+        loop {
+            let msg = match commands.recv() {
+                Ok(Command::Msg(msg)) => msg,
+                Ok(Command::Flush(done)) => {
+                    let _ = done.send(());
+                    continue;
+                }
+                Ok(Command::Shutdown) | Err(_) => break,
+            };
             let effects = reduce(Arc::make_mut(&mut current), msg);
             *self.state.write().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&current);
             // Full means an event is already pending; Closed means no UI listens.
@@ -138,6 +157,26 @@ impl StoreWorker {
                     }));
                 });
             }
+            Effect::Stage {
+                repo_id,
+                path,
+                paths,
+            } => self.repo_load.execute(move || {
+                let result = backend
+                    .open(&path, &cancel)
+                    .and_then(|repo| repo.stage(&paths, &cancel));
+                let _ = commands.send(Command::Msg(Msg::IndexUpdated { repo_id, result }));
+            }),
+            Effect::Unstage {
+                repo_id,
+                path,
+                paths,
+            } => self.repo_load.execute(move || {
+                let result = backend
+                    .open(&path, &cancel)
+                    .and_then(|repo| repo.unstage(&paths, &cancel));
+                let _ = commands.send(Command::Msg(Msg::IndexUpdated { repo_id, result }));
+            }),
         }
     }
 }

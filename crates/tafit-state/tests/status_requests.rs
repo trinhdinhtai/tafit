@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tafit_core::{ChangeKind, FileChange, Head, RepositoryInfo, RepositoryStatus};
-use tafit_state::{AppState, Effect, Loadable, Msg, RepoId, StatusRequestId, reduce};
+use tafit_state::{
+    AppState, ChangeGroup, Effect, FileRef, Loadable, Msg, RepoId, SelectMode, StatusRequestId,
+    reduce,
+};
 
 /// A state with one opened Repository, and the status read that opening started.
 fn opened() -> (AppState, RepoId, StatusRequestId) {
@@ -106,4 +109,73 @@ fn a_repository_that_has_not_opened_is_not_refreshed() {
     let repo_id = state.active_repo.expect("OpenRepo activates the new tab");
 
     assert_eq!(reduce(&mut state, Msg::RefreshStatus(repo_id)), []);
+}
+
+#[test]
+fn a_write_blocks_further_writes_until_the_change_list_after_it_loads() {
+    let (mut state, repo_id, first) = opened();
+    let unstaged = RepositoryStatus {
+        unstaged: vec![FileChange {
+            path: "a.txt".to_owned(),
+            kind: ChangeKind::Modified,
+        }],
+        ..RepositoryStatus::default()
+    };
+    reduce(&mut state, loaded(repo_id, first, unstaged));
+    reduce(
+        &mut state,
+        Msg::Select {
+            repo_id,
+            file: FileRef {
+                group: ChangeGroup::Unstaged,
+                path: "a.txt".to_owned(),
+            },
+            mode: SelectMode::Only,
+        },
+    );
+    let stage = reduce(&mut state, Msg::StageSelected(repo_id));
+    assert!(matches!(stage[..], [Effect::Stage { .. }]), "{stage:?}");
+
+    let after = only_status_read(reduce(
+        &mut state,
+        Msg::IndexUpdated {
+            repo_id,
+            result: Ok(()),
+        },
+    ));
+
+    // The list on screen still shows a.txt unstaged: staging it again
+    // (or committing on that list) must wait.
+    assert!(state.active().expect("a Repository is open").writing);
+    assert_eq!(reduce(&mut state, Msg::StageSelected(repo_id)), []);
+
+    reduce(
+        &mut state,
+        loaded(repo_id, after, RepositoryStatus::default()),
+    );
+
+    assert!(!state.active().expect("a Repository is open").writing);
+}
+
+#[test]
+fn a_refresh_finishing_during_a_write_does_not_end_it() {
+    let (mut state, repo_id, first) = opened();
+    reduce(&mut state, loaded(repo_id, first, untracked("a.txt")));
+    reduce(
+        &mut state,
+        Msg::Select {
+            repo_id,
+            file: FileRef {
+                group: ChangeGroup::Untracked,
+                path: "a.txt".to_owned(),
+            },
+            mode: SelectMode::Only,
+        },
+    );
+    reduce(&mut state, Msg::StageSelected(repo_id));
+    let refresh = only_status_read(reduce(&mut state, Msg::RefreshStatus(repo_id)));
+
+    reduce(&mut state, loaded(repo_id, refresh, untracked("a.txt")));
+
+    assert!(state.active().expect("a Repository is open").writing);
 }

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use criterion::measurement::{Measurement, ValueFormatter};
 use criterion::{Criterion, Throughput};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use tafit_core::RepositoryStatus;
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppStore, Loadable, Msg, StoreEvents};
+use tafit_state::{AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents};
 use tempfile::TempDir;
 
 /// Selects the full benchmark set; anything else runs the pull-request set.
@@ -81,6 +82,40 @@ impl Fixture {
         fixture
     }
 
+    /// A Repository named `name` with `files` committed files spread over
+    /// folders of 200, then a typical day's work on top: 1% of them edited,
+    /// a tenth of those staged, and 200 new untracked files.
+    pub fn large(name: &str, files: usize) -> Self {
+        let fixture = Self::new(name, 0);
+        let file = |ix: usize| format!("dir-{}/file-{ix}.txt", ix / 200);
+        for ix in 0..files {
+            let path = fixture.path.join(file(ix));
+            if ix % 200 == 0 {
+                std::fs::create_dir_all(path.parent().expect("a file has a folder"))
+                    .expect("create fixture folder");
+            }
+            std::fs::write(path, format!("tafit {ix}\n")).expect("write fixture file");
+        }
+        // Files written in the same second as the index are "racily clean", and
+        // every status would re-hash them; a real index rarely has many.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fixture.git(&["add", "."]);
+        fixture.git(&["commit", "--quiet", "-m", "files"]);
+        let edited: Vec<_> = (0..files).step_by(100).map(file).collect();
+        for path in &edited {
+            std::fs::write(fixture.path.join(path), "edited\n").expect("edit fixture file");
+        }
+        let mut stage = vec!["add", "--"];
+        stage.extend(edited.iter().step_by(10).map(String::as_str));
+        fixture.git(&stage);
+        // At the top level, so each is listed rather than collapsed into a folder.
+        for ix in 0..200 {
+            std::fs::write(fixture.path.join(format!("new-{ix}.txt")), "new\n")
+                .expect("write untracked file");
+        }
+        fixture
+    }
+
     /// The work tree to open.
     pub fn path(&self) -> &Path {
         &self.path
@@ -125,9 +160,52 @@ impl Store {
         Self { store, events }
     }
 
+    /// Opens `path` like `open`, then also waits for its first change list.
+    pub fn open_with_status(&self, path: &Path) -> RepoId {
+        let repo_id = self.open(path);
+        self.wait_for_status(repo_id, None);
+        repo_id
+    }
+
+    /// Re-reads `repo_id`'s change list (`Msg::RefreshStatus`) and blocks
+    /// until the new one is published.
+    pub fn refresh_status(&self, repo_id: RepoId) {
+        let previous = match &self.repo(repo_id).status {
+            Loadable::Ready(status) => Arc::clone(status),
+            _ => panic!("refresh_status needs a change list to replace"),
+        };
+        self.store.dispatch(Msg::RefreshStatus(repo_id));
+        self.wait_for_status(repo_id, Some(&previous));
+    }
+
+    /// Blocks until `repo_id` has a change list other than `previous`. Panics
+    /// if it fails to load.
+    fn wait_for_status(&self, repo_id: RepoId, previous: Option<&Arc<RepositoryStatus>>) {
+        loop {
+            match &self.repo(repo_id).status {
+                Loadable::Ready(status) if previous.is_none_or(|p| !Arc::ptr_eq(p, status)) => {
+                    return;
+                }
+                Loadable::Error(err) => panic!("status failed: {err}"),
+                _ => {}
+            }
+            self.events.recv_blocking().expect("the store is running");
+        }
+    }
+
+    fn repo(&self, repo_id: RepoId) -> RepoState {
+        let state = self.store.snapshot();
+        state
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .expect("the Repository is open")
+            .clone()
+    }
+
     /// Opens `path` in a new Repository Tab and blocks until it has loaded.
     /// Panics if it fails to open, so a broken benchmark can't look fast.
-    pub fn open(&self, path: &Path) {
+    pub fn open(&self, path: &Path) -> RepoId {
         let tabs = self.store.snapshot().repos.len();
         self.store.dispatch(Msg::OpenRepo(path.to_owned()));
         loop {
@@ -137,7 +215,7 @@ impl Store {
             if let Some(repo) = state.repos.get(tabs) {
                 match &repo.open {
                     Loadable::Loading => {}
-                    Loadable::Ready(_) => return,
+                    Loadable::Ready(_) => return repo.id,
                     Loadable::Error(err) => panic!("{} failed to open: {err}", path.display()),
                 }
             }

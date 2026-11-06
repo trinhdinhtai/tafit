@@ -106,6 +106,10 @@ impl StoreWorker {
                     .and_then(|repo| repo.info(&cancel));
                 let _ = commands.send(Command::Msg(Msg::RepoOpened { repo_id, result }));
             }),
+            Effect::DetectGit { request } => self.repo_load.execute(move || {
+                let result = backend.detect_git(&cancel);
+                let _ = commands.send(Command::Msg(Msg::GitDetected { request, result }));
+            }),
         }
     }
 }

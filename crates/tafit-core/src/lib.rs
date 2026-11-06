@@ -23,6 +23,67 @@ pub struct RepositoryInfo {
     pub head: Head,
 }
 
+/// A git version, as printed by `git --version`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitVersion {
+    /// The version as git prints it, e.g. `2.53.0.windows.2`.
+    pub text: String,
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl GitVersion {
+    /// The oldest git tafit is built against (major, minor). Older versions
+    /// still run, but the user is told to update.
+    pub const MINIMUM: (u32, u32) = (2, 53);
+
+    /// Parses `git --version` output such as `git version 2.53.0.windows.2` or
+    /// `git version 2.39.3 (Apple Git-146)`: the first word that starts with
+    /// `<major>.<minor>`.
+    pub fn parse(output: &str) -> Option<Self> {
+        output.split_whitespace().find_map(|word| {
+            let mut parts = word.split('.');
+            let major = leading_number(parts.next()?)?;
+            let minor = leading_number(parts.next()?)?;
+            Some(Self {
+                text: word.to_owned(),
+                major,
+                minor,
+            })
+        })
+    }
+
+    pub fn is_supported(&self) -> bool {
+        (self.major, self.minor) >= Self::MINIMUM
+    }
+
+    /// `MINIMUM` as users read it, e.g. `2.53`.
+    pub fn minimum_text() -> String {
+        let (major, minor) = Self::MINIMUM;
+        format!("{major}.{minor}")
+    }
+}
+
+fn leading_number(part: &str) -> Option<u32> {
+    let end = part
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(part.len());
+    part[..end].parse().ok()
+}
+
+/// The git found on this machine and the signing tools it will call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitEnvironment {
+    pub git_path: PathBuf,
+    pub version: GitVersion,
+    /// The program git runs to sign with OpenPGP (`gpg.program`, else `gpg`);
+    /// `None` when it can't be found.
+    pub gpg_path: Option<PathBuf>,
+    /// The program git runs to sign with SSH (`gpg.ssh.program`, else
+    /// `ssh-keygen`); `None` when it can't be found.
+    pub ssh_keygen_path: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum GitError {
     #[error("path does not exist: {}", .0.display())]
@@ -31,8 +92,40 @@ pub enum GitError {
     NotARepository(PathBuf),
     #[error("operation cancelled")]
     Cancelled,
+    /// No git executable could be started.
+    #[error("git was not found: {0}")]
+    GitNotFound(String),
+    /// A git command ran and exited unsuccessfully; holds everything it printed.
+    #[error("{}", command_failed_message(.command, *.exit_code, .stdout, .stderr))]
+    CommandFailed {
+        /// The command line, e.g. `git --version`.
+        command: String,
+        /// `None` when the process was ended by a signal.
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
     #[error("{0}")]
     Backend(String),
+}
+
+fn command_failed_message(
+    command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let mut message = match exit_code {
+        Some(code) => format!("`{command}` failed with exit code {code}"),
+        None => format!("`{command}` was terminated"),
+    };
+    for output in [stderr.trim(), stdout.trim()] {
+        if !output.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(output);
+        }
+    }
+    message
 }
 
 /// Cooperative cancellation for long-running reads; cloning shares the flag.
@@ -58,8 +151,11 @@ impl CancellationToken {
     }
 }
 
-/// Opens Repositories. Implemented by `tafit-git-gix`.
+/// Opens Repositories and runs the system git. Implemented by `tafit-git-gix`.
 pub trait GitBackend: Send + Sync {
+    /// Finds the system git, its version, and the signing tools it calls.
+    fn detect_git(&self, cancel: &CancellationToken) -> Result<GitEnvironment, GitError>;
+
     /// Opens the Repository at exactly `path` (no search through parent directories).
     fn open(
         &self,

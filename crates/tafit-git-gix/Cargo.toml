@@ -13,3 +13,6 @@ workspace = true
 [dependencies]
 gix = { workspace = true }
 tafit-core = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }

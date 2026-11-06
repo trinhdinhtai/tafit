@@ -6144,6 +6144,7 @@ name = "tafit-git-gix"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "rustix",
  "tafit-core",
 ]
 

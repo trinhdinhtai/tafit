@@ -1,14 +1,44 @@
 //! `GitBackend` implemented with gix (reads only; writes go through the git CLI).
 
-use std::path::Path;
+pub mod cli;
+mod detect;
+
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tafit_core::{CancellationToken, GitBackend, GitError, GitRepository, Head, RepositoryInfo};
+use tafit_core::{
+    CancellationToken, GitBackend, GitEnvironment, GitError, GitRepository, Head, RepositoryInfo,
+};
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GixBackend;
+use crate::cli::GitCli;
+
+#[derive(Clone, Debug, Default)]
+pub struct GixBackend {
+    /// The git executable to run; `None` searches `PATH`.
+    git: Option<PathBuf>,
+}
+
+impl GixBackend {
+    /// Runs the git at `program` instead of the one on `PATH`.
+    pub fn with_git(program: impl Into<PathBuf>) -> Self {
+        Self {
+            git: Some(program.into()),
+        }
+    }
+
+    fn git(&self) -> Result<GitCli, GitError> {
+        match &self.git {
+            Some(program) => Ok(GitCli::new(program.clone())),
+            None => GitCli::find(),
+        }
+    }
+}
 
 impl GitBackend for GixBackend {
+    fn detect_git(&self, cancel: &CancellationToken) -> Result<GitEnvironment, GitError> {
+        detect::detect_git(&self.git()?, cancel)
+    }
+
     fn open(
         &self,
         path: &Path,

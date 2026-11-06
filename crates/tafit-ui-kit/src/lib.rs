@@ -1,6 +1,8 @@
 //! tafit's own widgets and theme tokens. Pure GPUI: never depends on
 //! `tafit-core` or `tafit-state`, so widgets take plain data.
 
+pub mod fonts;
+
 use gpui::{Div, Hsla, IntoElement, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
 
 /// Color tokens. Widgets read colors from here, never from literals.

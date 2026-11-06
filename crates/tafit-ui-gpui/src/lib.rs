@@ -1,6 +1,7 @@
 //! The GPUI host: opens the Window and draws `AppState` snapshots. Holds no
 //! app state of its own; every change goes through the store.
 
+mod repository_tabs;
 mod status_panel;
 
 use std::path::PathBuf;
@@ -15,7 +16,9 @@ use tafit_state::{
     AppState, AppStore, Loadable, Msg, Page, RepoId, RepoState, StoreEvents, WindowId,
 };
 use tafit_ui_kit::text::{TextChanged, TextState, bind_text_keys, new_text_state};
-use tafit_ui_kit::{Theme, button, fonts, tab, tab_bar};
+use tafit_ui_kit::{Theme, button, fonts, tab_bar};
+
+use crate::repository_tabs::tab_bar_button;
 
 gpui::actions!(
     tafit,
@@ -196,22 +199,12 @@ impl Render for TafitView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let state = &self.state;
-        let window = state.window(self.window);
-        let active = window.and_then(|window| window.active_repo);
-        let page = window.map_or(Page::RepositoryTab, |window| window.page);
-        let tabs = state.tabs(self.window).map(|repo| {
-            div()
-                .debug_selector(|| "repository-tab".to_owned())
-                .h_full()
-                .child(tab(tab_label(repo), Some(repo.id) == active, theme))
-        });
-        let settings_button = div().flex().items_center().px(px(8.)).child(
-            // Compact, so it clears the 34 px tab bar by ~5 px above and below.
-            button("Settings", theme)
-                .py(px(2.))
-                .text_xs()
-                .id("settings-button")
-                .debug_selector(|| "settings-button".to_owned())
+        let page = state
+            .window(self.window)
+            .map_or(Page::RepositoryTab, |window| window.page);
+        let tabs = repository_tabs::repository_tabs(state, self.window, theme, cx);
+        let settings_button = div().flex().flex_none().items_center().px(px(8.)).child(
+            tab_bar_button("Settings", "settings-button", theme)
                 .on_click(cx.listener(|view, _, _, _| view.show_page(Page::Settings))),
         );
         let outdated_git = match &state.git {
@@ -242,12 +235,7 @@ impl Render for TafitView {
             .font_family(fonts::UI_FONT_FAMILY)
             .text_color(theme.text)
             .text_sm()
-            .child(
-                tab_bar(theme)
-                    .children(tabs)
-                    .child(div().flex_1())
-                    .child(settings_button),
-            )
+            .child(tab_bar(theme).child(tabs).child(settings_button))
             .children(outdated_git)
             .child(body)
     }
@@ -447,20 +435,6 @@ fn setting_row(
                 .font_family(fonts::MONOSPACE_FONT_FAMILY)
                 .child(value),
         )
-}
-
-fn tab_label(repo: &RepoState) -> SharedString {
-    match &repo.open {
-        Loadable::Ready(info) => info.name.clone().into(),
-        // Not opened (yet): fall back to the folder name.
-        _ => repo
-            .path
-            .file_name()
-            .unwrap_or(repo.path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
-            .into(),
-    }
 }
 
 fn repository_tab_body(

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
 use tafit_core::{
     ChangeKind, FileChange, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
     RepositoryStatus,
@@ -71,7 +71,10 @@ fn render(state: AppState, cx: &mut TestAppContext) -> &mut VisualTestContext {
 fn window_renders_the_repository_tab(cx: &mut TestAppContext) {
     let cx = render(state_with_open_repository(), cx);
 
-    assert!(cx.debug_bounds("repository-tab").is_some(), "tab bar entry");
+    assert!(
+        cx.debug_bounds("repository-tab-0").is_some(),
+        "tab bar entry"
+    );
     assert!(
         cx.debug_bounds("repository-name").is_some(),
         "Repository name"
@@ -299,4 +302,64 @@ fn a_refused_commit_shows_why(cx: &mut TestAppContext) {
     let cx = render(state, cx);
 
     assert!(cx.debug_bounds("write-error").is_some(), "the reason");
+}
+
+/// Opens a Window showing `state`, and returns the store it dispatches to.
+fn render_with_store(
+    state: AppState,
+    cx: &mut TestAppContext,
+) -> (Arc<AppStore>, &mut VisualTestContext) {
+    let (store, _events) = AppStore::with_state(Arc::new(GixBackend::default()), state);
+    let store = Arc::new(store);
+    let view_store = Arc::clone(&store);
+    let (_view, cx) =
+        cx.add_window_view(|_window, cx| TafitView::new(view_store, WindowId::FIRST, None, cx));
+    cx.run_until_parked();
+    (store, cx)
+}
+
+/// `state` with another Repository opened in a new, active tab.
+fn with_another_repository(mut state: AppState, path: &str) -> AppState {
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from(path),
+        },
+    );
+    state
+}
+
+#[gpui::test]
+fn clicking_a_tab_selects_it_and_a_middle_click_closes_it(cx: &mut TestAppContext) {
+    let state = with_another_repository(state_with_open_repository(), "/work/other");
+    let first = state.tabs(WindowId::FIRST).next().expect("two tabs").id;
+    let (store, cx) = render_with_store(state, cx);
+    let tab = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector)
+            .expect("the tab is drawn")
+            .center()
+    };
+    assert!(
+        cx.debug_bounds("close-tab").is_some(),
+        "tabs have a close button"
+    );
+
+    let first_tab = tab(cx, "repository-tab-0");
+    cx.simulate_click(first_tab, Modifiers::none());
+    store.flush();
+    assert_eq!(store.snapshot().active_repo(), Some(first));
+
+    let second_tab = tab(cx, "repository-tab-1");
+    cx.simulate_mouse_down(second_tab, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(second_tab, MouseButton::Middle, Modifiers::none());
+    store.flush();
+    let state = store.snapshot();
+    assert_eq!(
+        state
+            .tabs(WindowId::FIRST)
+            .map(|repo| repo.id)
+            .collect::<Vec<_>>(),
+        [first]
+    );
 }

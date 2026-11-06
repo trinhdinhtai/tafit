@@ -19,6 +19,13 @@ pub use store::{AppStore, StoreEvent, StoreEvents};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RepoId(u64);
 
+impl RepoId {
+    /// The id as a number, unique within the store, e.g. for UI element ids.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Loadable<T, E = String> {
     #[default]

@@ -6540,6 +6540,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tafit-core",
  "tafit-git-gix",
  "tafit-state",
  "tempfile",

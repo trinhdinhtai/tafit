@@ -2,12 +2,14 @@
 
 pub mod cli;
 mod detect;
+mod status;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
     CancellationToken, GitBackend, GitEnvironment, GitError, GitRepository, Head, RepositoryInfo,
+    RepositoryStatus,
 };
 
 use crate::cli::GitCli;
@@ -84,6 +86,10 @@ impl GitRepository for GixRepository {
             name: repository_name(&repo),
             head,
         })
+    }
+
+    fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError> {
+        status::status(&self.repo.to_thread_local(), cancel)
     }
 }
 

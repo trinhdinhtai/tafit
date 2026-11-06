@@ -1,0 +1,27 @@
+[package]
+name = "tafit-ui-gpui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+tafit-base = { workspace = true }
+tafit-core = { workspace = true }
+tafit-state = { workspace = true }
+tafit-ui-kit = { workspace = true }
+
+# The ADR picks GPUI's wgpu renderer on Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_platform = { workspace = true, features = ["windows-wgpu"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tafit-git-gix = { workspace = true }

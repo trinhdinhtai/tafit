@@ -1,0 +1,71 @@
+name: Nightly performance
+
+on:
+  schedule:
+    # 02:00 in Vietnam.
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: perf-nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  perf:
+    name: Full benchmark set on real Repositories
+    # A dedicated runner keeps the numbers comparable from night to night and
+    # has room for the Chromium snapshot; set the PERF_RUNNER repository
+    # variable to its label. Falls back to a hosted runner.
+    runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    env:
+      TAFIT_PERF_SUITE: nightly
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Outside the checkout: the Git snapshot has a Cargo.toml of its own.
+      - name: Locate Repository snapshots
+        shell: bash
+        run: echo "TAFIT_PERF_SNAPSHOTS=$RUNNER_TEMP/perf-snapshots" >> "$GITHUB_ENV"
+
+      # The pins live in the script, so its hash is the key: snapshots are
+      # cloned once per pin change, never on an ordinary night.
+      - name: Restore Repository snapshots
+        id: snapshots
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TAFIT_PERF_SNAPSHOTS }}
+          key: perf-snapshots-${{ runner.os }}-${{ hashFiles('scripts/perf-snapshots.sh') }}
+
+      - name: Fetch missing snapshots
+        if: steps.snapshots.outputs.cache-hit != 'true'
+        shell: bash
+        run: ./scripts/perf-snapshots.sh "$TAFIT_PERF_SNAPSHOTS"
+
+      # Saved before benchmarking, so a night over budget keeps them too.
+      - name: Save Repository snapshots
+        if: steps.snapshots.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TAFIT_PERF_SNAPSHOTS }}
+          key: ${{ steps.snapshots.outputs.cache-primary-key }}
+
+      - name: Benchmark
+        run: cargo bench --locked -p tafit-perf
+        env:
+          # A fresh directory, so results of an earlier night can't be read.
+          CRITERION_HOME: ${{ runner.temp }}/criterion
+
+      - name: Check budgets
+        run: cargo run --locked -p tafit-perf --bin budget-report -- --nightly
+        env:
+          CRITERION_HOME: ${{ runner.temp }}/criterion

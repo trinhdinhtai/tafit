@@ -7,12 +7,31 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, Render, SharedString, Task, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, IntoElement, KeyBinding, Render, SharedString, Subscription,
+    Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use tafit_core::{GitEnvironment, GitError, GitVersion, Head};
-use tafit_state::{AppState, AppStore, Loadable, Msg, RepoState, StoreEvents};
+use tafit_state::{AppState, AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents};
+use tafit_ui_kit::text::{TextChanged, TextState, bind_text_keys, new_text_state};
 use tafit_ui_kit::{Theme, button, fonts, tab, tab_bar};
+
+gpui::actions!(
+    tafit,
+    [
+        /// Commit what is staged with the typed message.
+        CommitStaged,
+    ]
+);
+
+/// Binds tafit's keys: text editing, and Ctrl/Cmd-Enter to commit.
+pub fn bind_keys(cx: &mut App) {
+    bind_text_keys(cx);
+    cx.bind_keys([KeyBinding::new(
+        "secondary-enter",
+        CommitStaged,
+        Some(status_panel::COMMIT_BOX_CONTEXT),
+    )]);
+}
 
 /// Where users get git.
 const GIT_DOWNLOAD_URL: &str = "https://git-scm.com/downloads";
@@ -27,6 +46,7 @@ pub fn run(store: Arc<AppStore>, events: StoreEvents) {
                 tafit_base::APP_NAME
             );
         }
+        bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
             WindowOptions {
@@ -82,7 +102,14 @@ pub struct TafitView {
     store: Arc<AppStore>,
     state: Arc<AppState>,
     theme: Theme,
+    /// The commit message box. Every edit goes to the store; the box takes
+    /// the store's message only when the Active Repository changes or a
+    /// commit is made, so a snapshot lagging behind typing can't undo keys.
+    commit_message: Entity<TextState>,
+    /// The Repository Tab and commit count the box last took its text from.
+    commit_message_source: Option<(RepoId, u64)>,
     _poller: Option<Task<()>>,
+    _commit_message_edits: Subscription,
 }
 
 impl TafitView {
@@ -97,6 +124,7 @@ impl TafitView {
                     let snapshot = store.snapshot();
                     let updated = view.update(cx, |view, cx| {
                         view.state = snapshot;
+                        view.sync_commit_message(cx);
                         cx.notify();
                     });
                     if updated.is_err() {
@@ -105,12 +133,44 @@ impl TafitView {
                 }
             })
         });
-        Self {
+        let commit_message = new_text_state(cx);
+        let edits = cx.subscribe(&commit_message, |view, message, _: &TextChanged, cx| {
+            if let Some(repo_id) = view.state.active_repo {
+                view.store.dispatch(Msg::EditCommitMessage {
+                    repo_id,
+                    message: message.read(cx).as_str().to_owned(),
+                });
+            }
+        });
+        let mut view = Self {
             state: store.snapshot(),
             store,
             theme: Theme::dark(),
+            commit_message,
+            commit_message_source: None,
             _poller: poller,
+            _commit_message_edits: edits,
+        };
+        view.sync_commit_message(cx);
+        view
+    }
+
+    /// Shows the Active Repository's message after a tab switch or a commit.
+    fn sync_commit_message(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.state.active() else {
+            return;
+        };
+        let source = Some((repo.id, repo.commits_made));
+        if self.commit_message_source == source {
+            return;
         }
+        self.commit_message_source = source;
+        let message = repo.commit_message.clone();
+        self.commit_message.update(cx, |text, cx| {
+            if text.as_str() != message {
+                text.emplace(&message, cx);
+            }
+        });
     }
 }
 
@@ -147,7 +207,10 @@ impl Render for TafitView {
             git_unavailable_notice(error, theme).into_any_element()
         } else {
             match state.active() {
-                Some(repo) => repository_tab_body(repo, theme, cx).into_any_element(),
+                Some(repo) => {
+                    repository_tab_body(repo, &self.store, &self.commit_message, theme, cx)
+                        .into_any_element()
+                }
                 None => centered_message("No Repository open", theme.text_muted).into_any_element(),
             }
         };
@@ -380,6 +443,8 @@ fn tab_label(repo: &RepoState) -> SharedString {
 
 fn repository_tab_body(
     repo: &RepoState,
+    store: &Arc<AppStore>,
+    commit_message: &Entity<TextState>,
     theme: &Theme,
     cx: &mut Context<TafitView>,
 ) -> impl IntoElement {
@@ -415,7 +480,13 @@ fn repository_tab_body(
                             .child(head_label(&info.head)),
                     ),
             )
-            .child(status_panel::status_panel(repo, theme, cx))
+            .child(status_panel::status_panel(
+                repo,
+                store,
+                commit_message,
+                theme,
+                cx,
+            ))
             .into_any_element(),
     }
 }

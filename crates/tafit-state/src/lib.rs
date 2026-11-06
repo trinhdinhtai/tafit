@@ -6,7 +6,7 @@ mod store;
 
 use std::path::PathBuf;
 
-use tafit_core::{GitError, RepositoryInfo};
+use tafit_core::{GitEnvironment, GitError, RepositoryInfo};
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
 
@@ -15,13 +15,19 @@ pub use store::{AppStore, StoreEvent, StoreEvents};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RepoId(u64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Loadable<T> {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Loadable<T, E = String> {
+    #[default]
     Loading,
     Ready(T),
-    /// Loading failed; holds the message shown to the user.
-    Error(String),
+    /// Loading failed; holds what is shown to the user.
+    Error(E),
 }
+
+/// Identifies one `Msg::DetectGit`, so an older detection's result can't
+/// replace a newer one's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GitRequestId(u64);
 
 /// One Repository Tab's state.
 #[derive(Clone, Debug)]
@@ -36,6 +42,11 @@ pub struct AppState {
     /// Open Repositories, in Repository Tab order.
     pub repos: Vec<RepoState>,
     pub active_repo: Option<RepoId>,
+    /// The system git, found at startup (`Msg::DetectGit`). An error means git
+    /// could not be run at all; `GitError::GitNotFound` means it isn't installed.
+    pub git: Loadable<GitEnvironment, GitError>,
+    /// The latest `Msg::DetectGit`; only its result is kept.
+    git_request: GitRequestId,
     next_repo_id: u64,
 }
 
@@ -60,12 +71,20 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<RepositoryInfo, GitError>,
     },
+    /// Find the system git and the signing tools it calls.
+    DetectGit,
+    /// Result of `Effect::DetectGit`.
+    GitDetected {
+        request: GitRequestId,
+        result: Result<GitEnvironment, GitError>,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     OpenRepo { repo_id: RepoId, path: PathBuf },
+    DetectGit { request: GitRequestId },
 }
 
 /// The pure reducer. Also the store's synchronous mode: tests and benchmarks
@@ -89,6 +108,22 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 repo.open = match result {
                     Ok(info) => Loadable::Ready(info),
                     Err(err) => Loadable::Error(err.to_string()),
+                };
+            }
+            Vec::new()
+        }
+        Msg::DetectGit => {
+            let request = GitRequestId(state.git_request.0 + 1);
+            state.git_request = request;
+            state.git = Loadable::Loading;
+            vec![Effect::DetectGit { request }]
+        }
+        Msg::GitDetected { request, result } => {
+            // A newer detection is running; its result will land instead.
+            if request == state.git_request {
+                state.git = match result {
+                    Ok(git) => Loadable::Ready(git),
+                    Err(err) => Loadable::Error(err),
                 };
             }
             Vec::new()

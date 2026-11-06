@@ -151,8 +151,11 @@ impl CancellationToken {
     }
 }
 
-/// Opens Repositories. Implemented by `tafit-git-gix`.
+/// Opens Repositories and runs the system git. Implemented by `tafit-git-gix`.
 pub trait GitBackend: Send + Sync {
+    /// Finds the system git, its version, and the signing tools it calls.
+    fn detect_git(&self, cancel: &CancellationToken) -> Result<GitEnvironment, GitError>;
+
     /// Opens the Repository at exactly `path` (no search through parent directories).
     fn open(
         &self,

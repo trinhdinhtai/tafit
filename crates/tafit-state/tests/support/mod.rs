@@ -99,6 +99,107 @@ impl TestRepo {
     }
 }
 
+/// A script standing in for git: a batch file on Windows, a shell script
+/// elsewhere. It ignores its arguments.
+pub struct FakeGit {
+    dir: TestDir,
+    program: PathBuf,
+}
+
+impl FakeGit {
+    /// Prints `stdout` and `stderr` (one line each, skipped when empty), then
+    /// exits with `exit_code`.
+    pub fn printing(stdout: &str, stderr: &str, exit_code: i32) -> Self {
+        let (mut windows, mut unix) = (String::from("@echo off\r\n"), String::new());
+        if !stdout.is_empty() {
+            windows += &format!("echo {stdout}\r\n");
+            unix += &format!("printf '%s\\n' '{stdout}'\n");
+        }
+        if !stderr.is_empty() {
+            windows += &format!("echo {stderr} 1>&2\r\n");
+            unix += &format!("printf '%s\\n' '{stderr}' >&2\n");
+        }
+        windows += &format!("exit /b {exit_code}\r\n");
+        unix += &format!("exit {exit_code}\n");
+        Self::new(&windows, &unix)
+    }
+
+    /// A git 2.53.0 whose `git config ...` prints `config_lines`.
+    pub fn with_config(config_lines: &[String]) -> Self {
+        let (mut windows, mut unix) = (
+            String::from("@echo off\r\nif not \"%1\"==\"config\" goto version\r\n"),
+            String::from("if [ \"$1\" = config ]; then\n"),
+        );
+        for line in config_lines {
+            windows += &format!("echo {line}\r\n");
+            unix += &format!("printf '%s\\n' '{line}'\n");
+        }
+        windows += "exit /b 0\r\n:version\r\necho git version 2.53.0\r\n";
+        unix += "exit 0\nfi\necho 'git version 2.53.0'\n";
+        Self::new(&windows, &unix)
+    }
+
+    /// Starts a child process that waits about two seconds and marks
+    /// `finished`, marks `started`, then waits. Only killing the whole process
+    /// tree keeps `finished` from appearing. On Windows the child gets its own
+    /// console: one sharing git's would die with git anyway.
+    pub fn hanging() -> Self {
+        Self::new(
+            "@echo off\r\n\
+             start \"\" /min cmd /c \"ping -n 3 127.0.0.1 >nul & echo.>\"%~dp0finished\"\"\r\n\
+             echo.>\"%~dp0started\"\r\n\
+             ping -n 4 127.0.0.1 >nul\r\n",
+            "dir=$(dirname \"$0\")\n\
+             (sleep 2; : > \"$dir/finished\") &\n\
+             : > \"$dir/started\"\n\
+             wait\n",
+        )
+    }
+
+    fn new(windows: &str, unix: &str) -> Self {
+        let dir = TestDir::new("fake-git");
+        let program = if cfg!(windows) {
+            let program = dir.path.join("git.cmd");
+            std::fs::write(&program, windows).expect("write fake git");
+            program
+        } else {
+            let program = dir.path.join("git");
+            std::fs::write(&program, format!("#!/bin/sh\n{unix}")).expect("write fake git");
+            make_executable(&program);
+            program
+        };
+        Self { dir, program }
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// Waits until a `hanging` fake has started.
+    pub fn wait_until_started(&self) {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        while !self.dir.path.join("started").exists() {
+            assert!(Instant::now() < deadline, "the fake git never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Whether a `hanging` fake ran to its end.
+    pub fn finished(&self) -> bool {
+        self.dir.path.join("finished").exists()
+    }
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake git executable");
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) {}
+
 fn null_device() -> &'static str {
     if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
@@ -110,8 +211,18 @@ pub struct TestStore {
 }
 
 impl TestStore {
+    /// Runs the git on `PATH`.
     pub fn new() -> Self {
-        let (store, events) = AppStore::new(Arc::new(GixBackend));
+        Self::with_backend(GixBackend::default())
+    }
+
+    /// Runs the git at `program` instead of the one on `PATH`.
+    pub fn with_git(program: &Path) -> Self {
+        Self::with_backend(GixBackend::with_git(program))
+    }
+
+    fn with_backend(backend: GixBackend) -> Self {
+        let (store, events) = AppStore::new(Arc::new(backend));
         Self { store, events }
     }
 

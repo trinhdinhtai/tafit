@@ -30,7 +30,10 @@ fn state_with_open_repository() -> AppState {
 
 #[gpui::test]
 fn window_renders_the_repository_tab(cx: &mut TestAppContext) {
-    let (store, _events) = AppStore::with_state(Arc::new(GixBackend), state_with_open_repository());
+    let (store, _events) = AppStore::with_state(
+        Arc::new(GixBackend::default()),
+        state_with_open_repository(),
+    );
 
     // No events receiver: the live poller is off under GPUI's test scheduler.
     let (_view, cx) = cx.add_window_view(|_window, cx| TafitView::new(Arc::new(store), None, cx));

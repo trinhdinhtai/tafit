@@ -1,5 +1,7 @@
 //! `GitBackend` implemented with gix (reads only; writes go through the git CLI).
 
+pub mod cli;
+
 use std::path::Path;
 use std::sync::Arc;
 

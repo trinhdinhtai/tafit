@@ -4,7 +4,7 @@ Crate `tafit-perf` chứa các benchmark Criterion chạy qua store và backend 
 
 ## Tập PR (mặc định)
 
-Mở một repo fixture tạo bằng git CLI, đo CPU idle với 1 và 10 Repository, và đo refresh status trên một repo fixture 80 nghìn file có thay đổi (đã stage, chưa stage, untracked). Mất vài phút sau khi build xong, phần lớn là để dựng repo 80 nghìn file.
+Mở một repo fixture tạo bằng git CLI, đo CPU idle với 1 và 10 Repository, đo chuyển Repository Tab khi có 20 tab đang mở (từ `Msg::ActivateRepo` tới lúc store công bố snapshot mới, chưa tính vẽ lại UI), và đo refresh status trên một repo fixture 80 nghìn file có thay đổi (đã stage, chưa stage, untracked). Mất vài phút sau khi build xong, phần lớn là để dựng repo 80 nghìn file.
 
 ```bash
 cargo bench -p tafit-perf

@@ -28,6 +28,13 @@ pub const BUDGETS: &[Budget] = &[
         limit: Limit::Time(Duration::from_millis(400)),
         suite: Suite::Pr,
     },
+    // One tab switch with 20 Repository Tabs open, until the store publishes
+    // it. About 13 µs on a Windows dev machine.
+    Budget {
+        benchmark: "switch_tab/20_tabs",
+        limit: Limit::Time(Duration::from_micros(500)),
+        suite: Suite::Pr,
+    },
     Budget {
         benchmark: "idle_cpu/1_repo",
         limit: Limit::CpuShare {

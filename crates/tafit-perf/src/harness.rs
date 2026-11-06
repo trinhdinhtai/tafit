@@ -203,6 +203,15 @@ impl Store {
             .clone()
     }
 
+    /// Selects `repo_id`'s tab (`Msg::ActivateRepo`) and blocks until it is
+    /// published as the Active Repository.
+    pub fn activate(&self, repo_id: RepoId) {
+        self.store.dispatch(Msg::ActivateRepo(repo_id));
+        while self.store.snapshot().active_repo() != Some(repo_id) {
+            self.events.recv_blocking().expect("the store is running");
+        }
+    }
+
     /// Opens `path` in a new Repository Tab and blocks until it has loaded.
     /// Panics if it fails to open, so a broken benchmark can't look fast.
     pub fn open(&self, path: &Path) -> RepoId {

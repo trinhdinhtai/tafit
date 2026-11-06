@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "status"
 harness = false
+
+[[bench]]
+name = "switch_tab"
+harness = false

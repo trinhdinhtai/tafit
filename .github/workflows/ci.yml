@@ -50,6 +50,27 @@ jobs:
         shell: bash
         run: ./scripts/check-crate-boundaries.sh
 
+  perf:
+    name: Performance budgets
+    # The pull-request set: open a fixture Repository, idle CPU with 1 and 10
+    # Repositories. The full set runs nightly (perf-nightly.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Benchmark
+        run: cargo bench --locked -p tafit-perf
+        env:
+          # A fresh directory, so results of an earlier run can't be read.
+          CRITERION_HOME: ${{ runner.temp }}/criterion
+      - name: Check budgets
+        run: cargo run --locked -p tafit-perf --bin budget-report
+        env:
+          CRITERION_HOME: ${{ runner.temp }}/criterion
+
   lint:
     name: Format and clippy
     runs-on: ubuntu-24.04

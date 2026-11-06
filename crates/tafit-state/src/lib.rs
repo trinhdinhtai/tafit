@@ -4,10 +4,13 @@
 
 mod store;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tafit_core::{GitEnvironment, GitError, RepositoryInfo, RepositoryStatus};
+use tafit_core::{
+    ChangeKind, FileChange, GitEnvironment, GitError, RepositoryInfo, RepositoryStatus,
+};
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
 
@@ -35,6 +38,43 @@ pub struct GitRequestId(u64);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatusRequestId(u64);
 
+/// One of the change list's three groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ChangeGroup {
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+impl ChangeGroup {
+    /// This group's files in `status`, sorted by path.
+    pub fn files(self, status: &RepositoryStatus) -> &[FileChange] {
+        match self {
+            Self::Staged => &status.staged,
+            Self::Unstaged => &status.unstaged,
+            Self::Untracked => &status.untracked,
+        }
+    }
+}
+
+/// One row of the change list: a file in a group. A file staged in part has
+/// a row in both `Staged` and `Unstaged`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileRef {
+    pub group: ChangeGroup,
+    /// As in `FileChange::path`.
+    pub path: String,
+}
+
+/// How `Msg::Select` changes the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMode {
+    /// Select only this file (a plain click).
+    Only,
+    /// Add the file, or take it out if already selected (Ctrl/Cmd-click).
+    Toggle,
+}
+
 /// One Repository Tab's state.
 #[derive(Clone, Debug)]
 pub struct RepoState {
@@ -48,9 +88,113 @@ pub struct RepoState {
     pub status_refreshing: bool,
     /// The latest status read; only its result is kept.
     status_request: StatusRequestId,
+    /// The selected rows of the change list. A new change list drops the
+    /// rows it no longer has.
+    pub selection: BTreeSet<FileRef>,
+    /// A stage, unstage or commit is running, or the status read after it
+    /// is, so `status` may not show what it did yet. Writes run one at a
+    /// time; the others are ignored until this ends.
+    pub writing: bool,
+    /// The write finished; `writing` ends once the status read after it lands.
+    write_settling: bool,
+    /// The running write is a commit. Its message is frozen until it ends,
+    /// since a made commit clears it.
+    pub committing: bool,
+    /// Why the last write failed or was refused, in full (git's output
+    /// included); cleared when the next write starts.
+    pub write_error: Option<String>,
+    /// The message of the next commit, as typed. Kept when a commit fails;
+    /// cleared once one is made.
+    pub commit_message: String,
+    /// Commits made from this Repository Tab. The UI empties its message box
+    /// when this grows.
+    pub commits_made: u64,
 }
 
 impl RepoState {
+    fn new(id: RepoId, path: PathBuf) -> Self {
+        Self {
+            id,
+            path,
+            open: Loadable::Loading,
+            status: Loadable::Loading,
+            status_refreshing: false,
+            status_request: StatusRequestId::default(),
+            selection: BTreeSet::new(),
+            writing: false,
+            write_settling: false,
+            committing: false,
+            write_error: None,
+            commit_message: String::new(),
+            commits_made: 0,
+        }
+    }
+
+    /// Why a commit can't be made now, for the user; `None` when it can.
+    /// A running write isn't a reason: the commit button waits for it.
+    pub fn commit_refusal(&self) -> Option<&'static str> {
+        let Loadable::Ready(status) = &self.status else {
+            return Some("The change list hasn't loaded yet.");
+        };
+        if status.staged.is_empty() && !status.merge_in_progress {
+            return Some("Nothing is staged. Stage the changes to commit first.");
+        }
+        if self.commit_message.trim().is_empty() {
+            return Some("Write a commit message first.");
+        }
+        None
+    }
+
+    /// Whether the row for `path` in `group` is selected.
+    pub fn is_selected(&self, group: ChangeGroup, path: &str) -> bool {
+        // shortcut: allocates a key per lookup; fine for the rows on screen.
+        self.selection.contains(&FileRef {
+            group,
+            path: path.to_owned(),
+        })
+    }
+
+    /// The paths of the selected rows in `groups`, as git should see them:
+    /// a rename names both its sides.
+    fn selected_paths(&self, groups: &[ChangeGroup]) -> Vec<String> {
+        let Loadable::Ready(status) = &self.status else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for selected in self
+            .selection
+            .iter()
+            .filter(|selected| groups.contains(&selected.group))
+        {
+            let files = selected.group.files(status);
+            if let Ok(ix) = files.binary_search_by(|file| file.path.cmp(&selected.path)) {
+                if let ChangeKind::Renamed { from } = &files[ix].kind {
+                    paths.push(from.clone());
+                }
+                paths.push(selected.path.clone());
+            }
+        }
+        paths
+    }
+
+    /// Starts a write, unless one is running or the Repository isn't open.
+    fn start_write(&mut self) -> bool {
+        if self.writing || !matches!(self.open, Loadable::Ready(_)) {
+            return false;
+        }
+        self.writing = true;
+        self.write_error = None;
+        true
+    }
+
+    /// Records how the running write went and re-reads the change list it
+    /// changed; `writing` ends when that read lands.
+    fn finish_write(&mut self, result: Result<(), GitError>) -> Effect {
+        self.write_settling = true;
+        self.write_error = result.err().map(|err| err.to_string());
+        self.request_status()
+    }
+
     /// Starts a new status read, superseding any still running.
     fn request_status(&mut self) -> Effect {
         self.status_request = StatusRequestId(self.status_request.0 + 1);
@@ -116,6 +260,39 @@ pub enum Msg {
     },
     OpenSettings,
     CloseSettings,
+    /// Change which rows of the change list are selected.
+    Select {
+        repo_id: RepoId,
+        file: FileRef,
+        mode: SelectMode,
+    },
+    /// Stage the selected unstaged and untracked files.
+    StageSelected(RepoId),
+    /// Unstage the selected staged files.
+    UnstageSelected(RepoId),
+    /// Result of `Effect::Stage` or `Effect::Unstage`.
+    IndexUpdated {
+        repo_id: RepoId,
+        result: Result<(), GitError>,
+    },
+    /// The commit message box changed.
+    EditCommitMessage {
+        repo_id: RepoId,
+        message: String,
+    },
+    /// Commit what is staged with `RepoState::commit_message`; refused, with
+    /// the reason in `write_error`, when `commit_refusal` gives one.
+    Commit(RepoId),
+    /// Result of `Effect::Commit`.
+    Committed {
+        repo_id: RepoId,
+        result: Result<(), GitError>,
+    },
+    /// Result of `Effect::LoadInfo`.
+    InfoLoaded {
+        repo_id: RepoId,
+        result: Result<RepositoryInfo, GitError>,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -134,6 +311,29 @@ pub enum Effect {
         request: StatusRequestId,
         path: PathBuf,
     },
+    /// Stage these repo-relative paths.
+    Stage {
+        repo_id: RepoId,
+        path: PathBuf,
+        paths: Vec<String>,
+    },
+    /// Unstage these repo-relative paths.
+    Unstage {
+        repo_id: RepoId,
+        path: PathBuf,
+        paths: Vec<String>,
+    },
+    /// Commit what is staged with this message.
+    Commit {
+        repo_id: RepoId,
+        path: PathBuf,
+        message: String,
+    },
+    /// Re-read what HEAD points at (after a commit moved it).
+    LoadInfo {
+        repo_id: RepoId,
+        path: PathBuf,
+    },
 }
 
 /// The pure reducer. Also the store's synchronous mode: tests and benchmarks
@@ -143,14 +343,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::OpenRepo(path) => {
             let repo_id = RepoId(state.next_repo_id);
             state.next_repo_id += 1;
-            state.repos.push(RepoState {
-                id: repo_id,
-                path: path.clone(),
-                open: Loadable::Loading,
-                status: Loadable::Loading,
-                status_refreshing: false,
-                status_request: StatusRequestId::default(),
-            });
+            state.repos.push(RepoState::new(repo_id, path.clone()));
             state.active_repo = Some(repo_id);
             vec![Effect::OpenRepo { repo_id, path }]
         }
@@ -180,10 +373,26 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 && request == repo.status_request
             {
                 repo.status = match result {
-                    Ok(status) => Loadable::Ready(Arc::new(status)),
+                    Ok(status) => {
+                        repo.selection.retain(|selected| {
+                            selected
+                                .group
+                                .files(&status)
+                                .binary_search_by(|file| file.path.cmp(&selected.path))
+                                .is_ok()
+                        });
+                        Loadable::Ready(Arc::new(status))
+                    }
                     Err(err) => Loadable::Error(err.to_string()),
                 };
                 repo.status_refreshing = false;
+                // Only a read started after the write finished settles it;
+                // one started during the write is stale by then.
+                if repo.write_settling {
+                    repo.write_settling = false;
+                    repo.writing = false;
+                    repo.committing = false;
+                }
             }
             Vec::new()
         }
@@ -214,6 +423,113 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::CloseSettings => {
             state.settings_open = false;
+            Vec::new()
+        }
+        Msg::Select {
+            repo_id,
+            file,
+            mode,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                match mode {
+                    SelectMode::Only => {
+                        repo.selection.clear();
+                        repo.selection.insert(file);
+                    }
+                    SelectMode::Toggle => {
+                        if !repo.selection.remove(&file) {
+                            repo.selection.insert(file);
+                        }
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Msg::StageSelected(repo_id) => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let paths = repo.selected_paths(&[ChangeGroup::Unstaged, ChangeGroup::Untracked]);
+            if paths.is_empty() || !repo.start_write() {
+                return Vec::new();
+            }
+            vec![Effect::Stage {
+                repo_id,
+                path: repo.path.clone(),
+                paths,
+            }]
+        }
+        Msg::UnstageSelected(repo_id) => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let paths = repo.selected_paths(&[ChangeGroup::Staged]);
+            if paths.is_empty() || !repo.start_write() {
+                return Vec::new();
+            }
+            vec![Effect::Unstage {
+                repo_id,
+                path: repo.path.clone(),
+                paths,
+            }]
+        }
+        Msg::IndexUpdated { repo_id, result } => match state.repo_mut(repo_id) {
+            Some(repo) => vec![repo.finish_write(result)],
+            None => Vec::new(),
+        },
+        Msg::EditCommitMessage { repo_id, message } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && !repo.committing
+            {
+                repo.commit_message = message;
+            }
+            Vec::new()
+        }
+        Msg::Commit(repo_id) => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            if repo.writing || !matches!(repo.open, Loadable::Ready(_)) {
+                return Vec::new();
+            }
+            if let Some(refusal) = repo.commit_refusal() {
+                repo.write_error = Some(refusal.to_owned());
+                return Vec::new();
+            }
+            repo.start_write();
+            repo.committing = true;
+            vec![Effect::Commit {
+                repo_id,
+                path: repo.path.clone(),
+                message: repo.commit_message.clone(),
+            }]
+        }
+        Msg::Committed { repo_id, result } => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let made = result.is_ok();
+            let mut effects = vec![repo.finish_write(result)];
+            if made {
+                repo.commit_message.clear();
+                repo.commits_made += 1;
+                effects.push(Effect::LoadInfo {
+                    repo_id,
+                    path: repo.path.clone(),
+                });
+            }
+            effects
+        }
+        Msg::InfoLoaded { repo_id, result } => {
+            // shortcut: no request id; reads only follow commits, which run
+            // one at a time, so an older read finishing last is unlikely.
+            // A failed re-read keeps the last HEAD; the status read after
+            // the commit reports a Repository that went bad.
+            if let Some(repo) = state.repo_mut(repo_id)
+                && let Ok(info) = result
+            {
+                repo.open = Loadable::Ready(info);
+            }
             Vec::new()
         }
     }

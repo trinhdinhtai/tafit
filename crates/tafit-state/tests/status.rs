@@ -215,3 +215,22 @@ fn a_conflicted_file_is_listed_once_as_unstaged() {
     assert_eq!(status.unstaged, [change("a.txt", ChangeKind::Modified)]);
     assert!(status.staged.is_empty(), "staged: {:?}", status.staged);
 }
+
+#[test]
+fn a_merge_left_to_conclude_is_in_progress() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.txt", "base\n")], "base");
+    repo.git(&["switch", "--quiet", "-c", "other"]);
+    repo.commit_files(&[("b.txt", "theirs\n")], "theirs");
+    repo.git(&["switch", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--no-ff", "--no-commit", "other"]);
+
+    assert!(status(repo.path()).merge_in_progress);
+}
+
+#[test]
+fn no_merge_is_in_progress_in_a_plain_repository() {
+    let repo = TestRepo::with_commit("repo");
+
+    assert!(!status(repo.path()).merge_in_progress);
+}

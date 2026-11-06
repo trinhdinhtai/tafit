@@ -3,7 +3,7 @@
 //! ends git together with everything it started (hooks, ssh, credential helpers).
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -69,13 +69,16 @@ impl GitCli {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.output_of(dir, &os_args(args), cancel)
+        self.output_of(dir, &os_args(args), None, cancel)
     }
 
+    /// `input`, when given, is written to git's stdin, which is then closed;
+    /// otherwise stdin is empty.
     fn output_of(
         &self,
         dir: Option<&Path>,
         args: &[OsString],
+        input: Option<Vec<u8>>,
         cancel: &CancellationToken,
     ) -> Result<GitOutput, GitError> {
         cancel.check()?;
@@ -89,7 +92,11 @@ impl GitCli {
             .env("GIT_TERMINAL_PROMPT", "0")
             // English messages, so errors read the same everywhere.
             .env("LANGUAGE", "en")
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         platform::configure(&mut command);
@@ -101,6 +108,7 @@ impl GitCli {
                 GitError::Backend(format!("could not run {}: {err}", self.command_line(args)))
             }
         })?;
+        let stdin = feed(child.stdin.take(), input);
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
 
@@ -119,6 +127,9 @@ impl GitCli {
         };
         // shortcut: a descendant that outlives git and keeps the pipes open
         // (a daemonizing hook) blocks these joins until it exits.
+        if let Some(stdin) = stdin {
+            let _ = stdin.join();
+        }
         Ok(GitOutput {
             exit_code: status.code(),
             stdout: join(stdout),
@@ -138,13 +149,39 @@ impl GitCli {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let args = os_args(args);
-        let output = self.output_of(dir, &args, cancel)?;
+        self.run_of(dir, &os_args(args), None, cancel)
+    }
+
+    /// Like `run`, writing `input` to git's stdin: for data too long or too
+    /// free-form for the command line, such as `--pathspec-from-file=-` or
+    /// `commit --file=-`.
+    pub fn run_with_input<I, S>(
+        &self,
+        dir: Option<&Path>,
+        args: I,
+        input: impl Into<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> Result<GitOutput, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_of(dir, &os_args(args), Some(input.into()), cancel)
+    }
+
+    fn run_of(
+        &self,
+        dir: Option<&Path>,
+        args: &[OsString],
+        input: Option<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> Result<GitOutput, GitError> {
+        let output = self.output_of(dir, args, input, cancel)?;
         if output.success() {
             return Ok(output);
         }
         Err(GitError::CommandFailed {
-            command: self.command_line(&args),
+            command: self.command_line(args),
             exit_code: output.exit_code,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -166,6 +203,22 @@ fn os_args<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>) -> Vec<OsString> 
     args.into_iter()
         .map(|arg| arg.as_ref().to_owned())
         .collect()
+}
+
+/// Writes `input` to git's stdin on its own thread, so git can fill its
+/// stdout and stderr pipes meanwhile, then closes it.
+fn feed(
+    pipe: Option<impl Write + Send + 'static>,
+    input: Option<Vec<u8>>,
+) -> Option<JoinHandle<()>> {
+    let (mut pipe, input) = (pipe?, input?);
+    thread::Builder::new()
+        .name("tafit-git-stdin".to_owned())
+        .spawn(move || {
+            // git may exit without reading it all; its exit code tells why.
+            let _ = pipe.write_all(&input);
+        })
+        .ok()
 }
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<JoinHandle<Vec<u8>>> {

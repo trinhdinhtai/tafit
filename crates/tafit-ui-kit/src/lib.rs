@@ -2,6 +2,7 @@
 //! `tafit-core` or `tafit-state`, so widgets take plain data.
 
 pub mod fonts;
+pub mod text;
 
 use gpui::{Div, Hsla, IntoElement, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
 
@@ -63,6 +64,21 @@ pub fn button(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .text_color(theme.text)
         .cursor_pointer()
         .hover_style(move |style| style.bg(hover))
+        .child(label.into())
+}
+
+/// A `button` that can't be clicked right now: muted, with no hover.
+pub fn disabled_button(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(theme.border)
+        .text_color(theme.text_muted)
         .child(label.into())
 }
 

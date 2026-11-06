@@ -10,4 +10,5 @@ tafit dùng fork `gpui-ce` (Apache-2.0), khai báo là git dependency pin theo m
 ## Hệ quả
 
 - Phải tự viết và tự bảo trì widget, gồm cả focus, bàn phím, IME (tiếng Việt) và accessibility.
+- Ngoại lệ: phần lõi soạn văn bản (IME, chọn chữ, clipboard, undo) của text input lấy từ `gpui_ce_elements`, crate nằm trong chính repo `gpui-ce` và pin cùng rev. Nó không kéo theo bản GPUI khác, nên lý do loại `gpui-kit` ở trên không áp dụng. `ui-kit` bọc nó lại (`text::text_area`) và tự lo giao diện theo theme; các crate khác không dùng trực tiếp `gpui_ce_elements`.
 - `gpui-ce` chỉ có một người duy trì. Nếu fork ngừng cập nhật, tafit phải tự duy trì fork hoặc chuyển sang `gpui` chính thức. Việc chuyển này tương đối nhẹ vì API gần như giống nhau.

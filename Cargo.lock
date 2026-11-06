@@ -2449,7 +2449,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7518b930f6aeb75e871d32ce873c2ae46e35cef19b5a0b039d4337f651d897cd"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3116,6 +3116,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "gpui_ce_elements"
+version = "0.1.0"
+source = "git+https://github.com/Havunen/gpui-ce.git?rev=4b3b9c54191be9762095dcdf7656d0d3ca30cecf#4b3b9c54191be9762095dcdf7656d0d3ca30cecf"
+dependencies = [
+ "derive_setters",
+ "gpui-ce",
+ "palette",
+ "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6579,6 +6591,7 @@ name = "tafit-ui-kit"
 version = "0.1.0"
 dependencies = [
  "gpui-ce",
+ "gpui_ce_elements",
  "skrifa 0.49.0",
 ]
 

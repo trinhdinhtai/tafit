@@ -19,6 +19,7 @@ pub(crate) fn status(
     if repo.workdir().is_none() {
         return Ok(status);
     }
+    status.merge_in_progress = matches!(repo.state(), Some(gix::state::InProgress::Merge));
     let items = repo
         .status(gix::progress::Discard)
         .map_err(backend_error)?

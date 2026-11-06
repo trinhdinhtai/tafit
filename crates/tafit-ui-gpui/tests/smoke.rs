@@ -10,7 +10,7 @@ use tafit_core::{
     RepositoryStatus,
 };
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppState, AppStore, Effect, Msg, reduce};
+use tafit_state::{AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, SelectMode, reduce};
 use tafit_ui_gpui::TafitView;
 
 /// A snapshot with one opened Repository, built with the synchronous reducer.
@@ -191,6 +191,7 @@ fn the_change_list_shows_its_three_groups(cx: &mut TestAppContext) {
             change("gone.txt", ChangeKind::Deleted),
         ],
         untracked: vec![change("notes/", ChangeKind::Added)],
+        ..RepositoryStatus::default()
     };
 
     let cx = render(with_status(state_with_open_repository(), status), cx);
@@ -217,4 +218,70 @@ fn a_clean_repository_says_there_are_no_changes(cx: &mut TestAppContext) {
         "no-changes message"
     );
     assert!(cx.debug_bounds("status-row").is_none(), "no file rows");
+}
+
+/// `state` with `a.txt` staged and selected, and `message` typed.
+fn ready_to_commit(message: &str) -> AppState {
+    let mut state = with_status(
+        state_with_open_repository(),
+        RepositoryStatus {
+            staged: vec![change("a.txt", ChangeKind::Modified)],
+            ..RepositoryStatus::default()
+        },
+    );
+    let repo_id = state.active_repo.expect("a Repository is open");
+    reduce(
+        &mut state,
+        Msg::Select {
+            repo_id,
+            file: FileRef {
+                group: ChangeGroup::Staged,
+                path: "a.txt".to_owned(),
+            },
+            mode: SelectMode::Only,
+        },
+    );
+    reduce(
+        &mut state,
+        Msg::EditCommitMessage {
+            repo_id,
+            message: message.to_owned(),
+        },
+    );
+    state
+}
+
+#[gpui::test]
+fn staged_changes_and_a_message_can_be_committed(cx: &mut TestAppContext) {
+    let cx = render(ready_to_commit("Fix the parser"), cx);
+
+    assert!(cx.debug_bounds("commit-message").is_some(), "message box");
+    assert!(cx.debug_bounds("commit-button").is_some(), "commit button");
+    assert!(
+        cx.debug_bounds("unstage-selected").is_some(),
+        "the selection can be unstaged"
+    );
+    assert!(
+        cx.debug_bounds("stage-selected-disabled").is_some(),
+        "nothing selected to stage"
+    );
+}
+
+#[gpui::test]
+fn without_a_message_the_commit_button_is_disabled(cx: &mut TestAppContext) {
+    let cx = render(ready_to_commit(""), cx);
+
+    assert!(cx.debug_bounds("commit-button-disabled").is_some());
+    assert!(cx.debug_bounds("commit-button").is_none());
+}
+
+#[gpui::test]
+fn a_refused_commit_shows_why(cx: &mut TestAppContext) {
+    let mut state = with_status(state_with_open_repository(), RepositoryStatus::default());
+    let repo_id = state.active_repo.expect("a Repository is open");
+    reduce(&mut state, Msg::Commit(repo_id));
+
+    let cx = render(state, cx);
+
+    assert!(cx.debug_bounds("write-error").is_some(), "the reason");
 }

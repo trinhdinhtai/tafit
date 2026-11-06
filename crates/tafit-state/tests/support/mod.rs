@@ -39,13 +39,31 @@ pub struct TestRepo {
 }
 
 impl TestRepo {
-    /// `git init` with `main` as the initial branch and no commits.
+    /// `git init` with `main` as the initial branch and no commits. The
+    /// store's git reads the user's config, so the repo's own config sets an
+    /// identity, turns signing off and keeps hooks in `.git/hooks`.
     pub fn init(name: &str) -> Self {
         let repo = Self {
             dir: TestDir::new(name),
         };
         repo.git(&["init", "--quiet", "--initial-branch=main"]);
+        for (key, value) in [
+            ("user.name", "tafit test"),
+            ("user.email", "test@tafit.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            repo.git(&["config", key, value]);
+        }
         repo
+    }
+
+    /// Installs a shell-script hook; git for Windows runs it with its own sh.
+    pub fn hook(&self, name: &str, script: &str) {
+        let path = self.path().join(".git/hooks").join(name);
+        std::fs::create_dir_all(path.parent().expect("hooks folder")).expect("create hooks folder");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write hook");
+        make_executable(&path);
     }
 
     /// `git init --bare` with `main` as the initial branch.
@@ -260,6 +278,12 @@ impl TestStore {
 
     pub fn dispatch(&self, msg: Msg) {
         self.store.dispatch(msg);
+    }
+
+    /// Waits until every `Msg` dispatched so far has been reduced, so a
+    /// following `wait_until` can't see a snapshot from before them.
+    pub fn flush(&self) {
+        self.store.flush();
     }
 
     /// Waits until `done` holds for a published snapshot, then returns it.

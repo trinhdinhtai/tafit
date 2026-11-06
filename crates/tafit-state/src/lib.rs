@@ -47,6 +47,8 @@ pub struct AppState {
     pub git: Loadable<GitEnvironment, GitError>,
     /// The latest `Msg::DetectGit`; only its result is kept.
     git_request: GitRequestId,
+    /// Whether the settings page is shown in place of the Repository Tab.
+    pub settings_open: bool,
     next_repo_id: u64,
 }
 
@@ -78,6 +80,8 @@ pub enum Msg {
         request: GitRequestId,
         result: Result<GitEnvironment, GitError>,
     },
+    OpenSettings,
+    CloseSettings,
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -126,6 +130,14 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     Err(err) => Loadable::Error(err),
                 };
             }
+            Vec::new()
+        }
+        Msg::OpenSettings => {
+            state.settings_open = true;
+            Vec::new()
+        }
+        Msg::CloseSettings => {
+            state.settings_open = false;
             Vec::new()
         }
     }

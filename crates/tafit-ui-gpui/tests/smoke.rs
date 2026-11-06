@@ -1,23 +1,32 @@
-//! GPUI smoke tests: a Window renders a Repository Tab, the git notices and
-//! the settings page. Logic is tested through the store (tafit-state), not here.
+//! GPUI smoke tests: a Window renders Repository Tabs, the Open Repository
+//! page, the git notices and the settings page, and clicks reach the store.
+//! Logic is tested through the store (tafit-state), not here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
 use tafit_core::{
     ChangeKind, FileChange, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
     RepositoryStatus,
 };
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, SelectMode, reduce};
+use tafit_state::{
+    AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, Page, SelectMode, WindowId, reduce,
+};
 use tafit_ui_gpui::TafitView;
 
 /// A snapshot with one opened Repository, built with the synchronous reducer.
 fn state_with_open_repository() -> AppState {
     let mut state = AppState::default();
-    reduce(&mut state, Msg::OpenRepo(PathBuf::from("/work/my-repo")));
-    let repo_id = state.active_repo.expect("OpenRepo activates the new tab");
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from("/work/my-repo"),
+        },
+    );
+    let repo_id = state.active_repo().expect("OpenRepo activates the new tab");
     reduce(
         &mut state,
         Msg::RepoOpened {
@@ -52,8 +61,8 @@ fn git_environment(version_output: &str) -> GitEnvironment {
 /// Opens a Window showing `state`.
 fn render(state: AppState, cx: &mut TestAppContext) -> &mut VisualTestContext {
     let (store, _events) = AppStore::with_state(Arc::new(GixBackend::default()), state);
-    // No events receiver: the live poller is off under GPUI's test scheduler.
-    let (_view, cx) = cx.add_window_view(|_window, cx| TafitView::new(Arc::new(store), None, cx));
+    let (_view, cx) =
+        cx.add_window_view(|_window, cx| TafitView::new(Arc::new(store), WindowId::FIRST, cx));
     cx.run_until_parked();
     cx
 }
@@ -62,7 +71,10 @@ fn render(state: AppState, cx: &mut TestAppContext) -> &mut VisualTestContext {
 fn window_renders_the_repository_tab(cx: &mut TestAppContext) {
     let cx = render(state_with_open_repository(), cx);
 
-    assert!(cx.debug_bounds("repository-tab").is_some(), "tab bar entry");
+    assert!(
+        cx.debug_bounds("repository-tab-0").is_some(),
+        "tab bar entry"
+    );
     assert!(
         cx.debug_bounds("repository-name").is_some(),
         "Repository name"
@@ -133,7 +145,13 @@ fn the_settings_page_shows_the_programs_found(cx: &mut TestAppContext) {
         state_with_open_repository(),
         Ok(git_environment("git version 2.53.0.windows.2")),
     );
-    reduce(&mut state, Msg::OpenSettings);
+    reduce(
+        &mut state,
+        Msg::ShowPage {
+            window: WindowId::FIRST,
+            page: Page::Settings,
+        },
+    );
 
     let cx = render(state, cx);
 
@@ -154,7 +172,7 @@ fn the_settings_page_shows_the_programs_found(cx: &mut TestAppContext) {
 
 /// `state`'s Active Repository after its status read reported `status`.
 fn with_status(mut state: AppState, status: RepositoryStatus) -> AppState {
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     let [Effect::LoadStatus { request, .. }] = reduce(&mut state, Msg::RefreshStatus(repo_id))[..]
     else {
         panic!("RefreshStatus asks for one status read");
@@ -229,7 +247,7 @@ fn ready_to_commit(message: &str) -> AppState {
             ..RepositoryStatus::default()
         },
     );
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     reduce(
         &mut state,
         Msg::Select {
@@ -278,10 +296,149 @@ fn without_a_message_the_commit_button_is_disabled(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_commit_shows_why(cx: &mut TestAppContext) {
     let mut state = with_status(state_with_open_repository(), RepositoryStatus::default());
-    let repo_id = state.active_repo.expect("a Repository is open");
+    let repo_id = state.active_repo().expect("a Repository is open");
     reduce(&mut state, Msg::Commit(repo_id));
 
     let cx = render(state, cx);
 
     assert!(cx.debug_bounds("write-error").is_some(), "the reason");
+}
+
+/// Opens a Window showing `state`, and returns the store it dispatches to.
+fn render_with_store(
+    state: AppState,
+    cx: &mut TestAppContext,
+) -> (Arc<AppStore>, &mut VisualTestContext) {
+    let (store, _events) = AppStore::with_state(Arc::new(GixBackend::default()), state);
+    let store = Arc::new(store);
+    let view_store = Arc::clone(&store);
+    let (_view, cx) =
+        cx.add_window_view(|_window, cx| TafitView::new(view_store, WindowId::FIRST, cx));
+    cx.run_until_parked();
+    (store, cx)
+}
+
+/// `state` with another Repository opened in a new, active tab.
+fn with_another_repository(mut state: AppState, path: &str) -> AppState {
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from(path),
+        },
+    );
+    state
+}
+
+#[gpui::test]
+fn clicking_a_tab_selects_it_and_a_middle_click_closes_it(cx: &mut TestAppContext) {
+    let state = with_another_repository(state_with_open_repository(), "/work/other");
+    let first = state.tabs(WindowId::FIRST).next().expect("two tabs").id;
+    let (store, cx) = render_with_store(state, cx);
+    let tab = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector)
+            .expect("the tab is drawn")
+            .center()
+    };
+    assert!(
+        cx.debug_bounds("close-tab").is_some(),
+        "tabs have a close button"
+    );
+
+    let first_tab = tab(cx, "repository-tab-0");
+    cx.simulate_click(first_tab, Modifiers::none());
+    store.flush();
+    assert_eq!(store.snapshot().active_repo(), Some(first));
+
+    let second_tab = tab(cx, "repository-tab-1");
+    cx.simulate_mouse_down(second_tab, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(second_tab, MouseButton::Middle, Modifiers::none());
+    store.flush();
+    let state = store.snapshot();
+    assert_eq!(
+        state
+            .tabs(WindowId::FIRST)
+            .map(|repo| repo.id)
+            .collect::<Vec<_>>(),
+        [first]
+    );
+}
+
+#[gpui::test]
+fn a_window_without_tabs_offers_the_pinned_and_recent_repositories(cx: &mut TestAppContext) {
+    let mut state = state_with_open_repository();
+    let repo_id = state.active_repo().expect("a Repository is open");
+    reduce(&mut state, Msg::PinRepo(PathBuf::from("/work/pinned")));
+    reduce(&mut state, Msg::CloseRepo(repo_id));
+
+    let (store, cx) = render_with_store(state, cx);
+
+    assert!(
+        cx.debug_bounds("open-repository-page").is_some(),
+        "the page"
+    );
+    assert!(cx.debug_bounds("open-folder").is_some(), "folder picker");
+    assert!(
+        cx.debug_bounds("unpin-repository").is_some(),
+        "the pinned one"
+    );
+    assert!(
+        cx.debug_bounds("pin-repository").is_some(),
+        "the recent one"
+    );
+
+    let pin = cx.debug_bounds("pin-repository").expect("drawn").center();
+    cx.simulate_click(pin, Modifiers::none());
+    store.flush();
+    assert_eq!(
+        store.snapshot().pinned,
+        [
+            PathBuf::from("/work/pinned"),
+            PathBuf::from("/work/my-repo")
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_missing_git_is_shown_even_without_a_repository_tab(cx: &mut TestAppContext) {
+    let state = with_git(
+        AppState::default(),
+        Err(GitError::GitNotFound("no `git` on PATH".to_owned())),
+    );
+
+    let cx = render(state, cx);
+
+    assert!(cx.debug_bounds("git-missing-notice").is_some(), "notice");
+}
+
+#[gpui::test]
+fn the_plus_button_shows_the_open_repository_page(cx: &mut TestAppContext) {
+    let (store, cx) = render_with_store(state_with_open_repository(), cx);
+
+    let plus = cx
+        .debug_bounds("open-repository-button")
+        .expect("drawn")
+        .center();
+    cx.simulate_click(plus, Modifiers::none());
+    store.flush();
+
+    let state = store.snapshot();
+    assert_eq!(
+        state.window(WindowId::FIRST).expect("the Window").page,
+        Page::OpenRepository
+    );
+}
+
+#[gpui::test]
+fn the_new_window_button_opens_a_window_in_the_store(cx: &mut TestAppContext) {
+    let (store, cx) = render_with_store(state_with_open_repository(), cx);
+
+    let button = cx
+        .debug_bounds("new-window-button")
+        .expect("drawn")
+        .center();
+    cx.simulate_click(button, Modifiers::none());
+    store.flush();
+
+    assert_eq!(store.snapshot().windows.len(), 2);
 }

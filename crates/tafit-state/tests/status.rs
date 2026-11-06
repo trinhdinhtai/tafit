@@ -4,12 +4,15 @@ use std::path::Path;
 
 use support::{TestRepo, TestStore};
 use tafit_core::{ChangeKind, FileChange, RepositoryStatus};
-use tafit_state::{Loadable, Msg};
+use tafit_state::{Loadable, Msg, WindowId};
 
 /// Opens `path` in a fresh store and returns the Repository's first change list.
 fn status(path: &Path) -> RepositoryStatus {
     let store = TestStore::new();
-    store.dispatch(Msg::OpenRepo(path.to_owned()));
+    store.dispatch(Msg::OpenRepo {
+        window: WindowId::FIRST,
+        path: path.to_owned(),
+    });
     let state = store.wait_until(|state| {
         state
             .active()
@@ -166,13 +169,18 @@ fn a_bare_repository_has_no_changes() {
 fn refreshing_picks_up_changes_made_since_the_last_read() {
     let repo = TestRepo::with_commit("repo");
     let store = TestStore::new();
-    store.dispatch(Msg::OpenRepo(repo.path().to_owned()));
+    store.dispatch(Msg::OpenRepo {
+        window: WindowId::FIRST,
+        path: repo.path().to_owned(),
+    });
     let opened = store.wait_until(|state| {
         state
             .active()
             .is_some_and(|repo| matches!(repo.status, Loadable::Ready(_)))
     });
-    let repo_id = opened.active_repo.expect("the opened Repository is active");
+    let repo_id = opened
+        .active_repo()
+        .expect("the opened Repository is active");
     repo.write("later.txt", "written after opening\n");
 
     store.dispatch(Msg::RefreshStatus(repo_id));

@@ -7,14 +7,20 @@ use std::sync::Arc;
 use tafit_core::{ChangeKind, FileChange, Head, RepositoryInfo, RepositoryStatus};
 use tafit_state::{
     AppState, ChangeGroup, Effect, FileRef, Loadable, Msg, RepoId, SelectMode, StatusRequestId,
-    reduce,
+    WindowId, reduce,
 };
 
 /// A state with one opened Repository, and the status read that opening started.
 fn opened() -> (AppState, RepoId, StatusRequestId) {
     let mut state = AppState::default();
-    reduce(&mut state, Msg::OpenRepo(PathBuf::from("/work/repo")));
-    let repo_id = state.active_repo.expect("OpenRepo activates the new tab");
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from("/work/repo"),
+        },
+    );
+    let repo_id = state.active_repo().expect("OpenRepo activates the new tab");
     let effects = reduce(
         &mut state,
         Msg::RepoOpened {
@@ -105,8 +111,14 @@ fn an_older_read_finishing_first_does_not_end_the_refresh() {
 #[test]
 fn a_repository_that_has_not_opened_is_not_refreshed() {
     let mut state = AppState::default();
-    reduce(&mut state, Msg::OpenRepo(PathBuf::from("/work/repo")));
-    let repo_id = state.active_repo.expect("OpenRepo activates the new tab");
+    reduce(
+        &mut state,
+        Msg::OpenRepo {
+            window: WindowId::FIRST,
+            path: PathBuf::from("/work/repo"),
+        },
+    );
+    let repo_id = state.active_repo().expect("OpenRepo activates the new tab");
 
     assert_eq!(reduce(&mut state, Msg::RefreshStatus(repo_id)), []);
 }

@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 gpui = { workspace = true }
+
+[dev-dependencies]
+skrifa = { workspace = true }

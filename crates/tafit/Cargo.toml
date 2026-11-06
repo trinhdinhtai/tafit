@@ -16,3 +16,6 @@ ui-gpui = ["tafit-app/ui-gpui"]
 
 [dependencies]
 tafit-app = { workspace = true }
+
+[build-dependencies]
+embed-resource = { workspace = true }

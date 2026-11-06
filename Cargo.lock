@@ -6113,6 +6113,7 @@ dependencies = [
 name = "tafit"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "tafit-app",
 ]
 
@@ -6170,6 +6171,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-ce",
  "gpui_ce_platform",
+ "image",
  "tafit-base",
  "tafit-core",
  "tafit-git-gix",
@@ -6182,6 +6184,7 @@ name = "tafit-ui-kit"
 version = "0.1.0"
 dependencies = [
  "gpui-ce",
+ "skrifa 0.49.0",
 ]
 
 [[package]]

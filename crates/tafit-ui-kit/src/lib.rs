@@ -4,7 +4,7 @@
 pub mod fonts;
 pub mod text;
 
-use gpui::{Div, Hsla, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
+use gpui::{ColorExt, Div, Hsla, SharedString, div, prelude::*, px, rgb, rgb_to_hsla};
 
 /// Color tokens. Widgets read colors from here, never from literals.
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +65,20 @@ pub fn button(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .cursor_pointer()
         .hover_style(move |style| style.bg(hover))
         .child(label.into())
+}
+
+/// A `button` that is on or off, e.g. one of a group of options; an on one
+/// is drawn in the accent color. The caller gives it an id and a click
+/// handler.
+pub fn toggle_button(label: impl Into<SharedString>, on: bool, theme: &Theme) -> Div {
+    let button = button(label, theme).text_xs().py(px(2.)).px(px(8.));
+    if on {
+        button
+            .border_color(theme.accent)
+            .bg(theme.accent.opacity(0.2))
+    } else {
+        button.text_color(theme.text_muted)
+    }
 }
 
 /// A `button` that can't be clicked right now: muted, with no hover.

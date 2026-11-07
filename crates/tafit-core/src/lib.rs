@@ -1,7 +1,9 @@
 //! Domain types and the Git backend interface. Never depends on GPUI.
 
 mod align;
+mod highlight;
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,6 +121,9 @@ pub struct ColumnLine {
     pub text: String,
     /// The line is removed (old side) or added (new side).
     pub changed: bool,
+    /// Byte ranges of `text` that changed, when the row's other side is the
+    /// line this one was edited from or into; sorted, never touching.
+    pub highlights: Vec<Range<usize>>,
     /// The file ends here without a newline.
     pub no_newline_at_end: bool,
 }
@@ -139,6 +144,7 @@ impl FileDiff {
                 number: number.unwrap_or_default(),
                 text: line.text.clone(),
                 changed: line.kind != LineKind::Context,
+                highlights: Vec::new(),
                 no_newline_at_end: line.no_newline_at_end,
             };
             if line.kind != LineKind::Added {
@@ -177,10 +183,11 @@ fn column_rows(old: Vec<ColumnLine>, new: Vec<ColumnLine>, ops: &[align::Op]) ->
         let pairs = deleted.len().max(inserted.len());
         let (mut d, mut i) = (deleted.drain(..), inserted.drain(..));
         for _ in 0..pairs {
-            rows.push(ColumnRow {
-                old: d.next(),
-                new: i.next(),
-            });
+            let (mut old, mut new) = (d.next(), i.next());
+            if let (Some(old), Some(new)) = (&mut old, &mut new) {
+                (old.highlights, new.highlights) = highlight::changed_ranges(&old.text, &new.text);
+            }
+            rows.push(ColumnRow { old, new });
         }
     };
     for op in ops {
@@ -258,6 +265,7 @@ impl FileDiff {
                     // need the exact bytes.
                     text: String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text))
                         .into_owned(),
+                    highlights: Vec::new(),
                     no_newline_at_end: false,
                 });
             } else if let Some(hunk) = Hunk::parse_header(raw) {
@@ -269,6 +277,36 @@ impl FileDiff {
             }
         }
         Self::Text(hunks)
+    }
+
+    /// Highlights what changed within lines: in each run of removed lines
+    /// followed by added ones, the first removed line pairs with the first
+    /// added one, the second with the second, and so on.
+    pub fn with_highlights(mut self) -> Self {
+        if let Self::Text(hunks) = &mut self {
+            for hunk in hunks {
+                let mut ix = 0;
+                while ix < hunk.lines.len() {
+                    let removed = hunk.lines[ix..]
+                        .iter()
+                        .take_while(|line| line.kind == LineKind::Removed)
+                        .count();
+                    let added = hunk.lines[ix + removed..]
+                        .iter()
+                        .take_while(|line| line.kind == LineKind::Added)
+                        .count();
+                    for pair in 0..removed.min(added) {
+                        let (old, new) = (ix + pair, ix + removed + pair);
+                        let (old_ranges, new_ranges) =
+                            highlight::changed_ranges(&hunk.lines[old].text, &hunk.lines[new].text);
+                        hunk.lines[old].highlights = old_ranges;
+                        hunk.lines[new].highlights = new_ranges;
+                    }
+                    ix += (removed + added).max(1);
+                }
+            }
+        }
+        self
     }
 }
 
@@ -327,6 +365,10 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
     /// The line without its `+`/`-`/` ` marker and line ending.
     pub text: String,
+    /// Byte ranges of `text` that changed, on a removed line shown with the
+    /// added line that replaced it and the other way round; sorted, never
+    /// touching. Empty until `FileDiff::with_highlights`.
+    pub highlights: Vec<Range<usize>>,
     /// The file ends here without a newline.
     pub no_newline_at_end: bool,
 }

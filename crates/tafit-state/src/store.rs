@@ -181,7 +181,9 @@ impl StoreWorker {
                 }
                 self.repo_load.execute(move || {
                     let result = backend.open(&path, &read).and_then(|repo| match layout {
-                        DiffLayout::Inline => repo.diff(source, &paths, DiffContext::Hunks, &read),
+                        DiffLayout::Inline => repo
+                            .diff(source, &paths, DiffContext::Hunks, &read)
+                            .map(FileDiff::with_highlights),
                         // Aligned here, off the store thread.
                         DiffLayout::TwoColumn => repo
                             .diff(source, &paths, DiffContext::WholeFile, &read)

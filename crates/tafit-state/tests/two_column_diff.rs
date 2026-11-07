@@ -122,3 +122,83 @@ fn a_moved_block_of_code_keeps_the_rest_of_the_file_aligned() {
         ]
     );
 }
+
+/// The highlighted parts of a line's text.
+fn highlighted<'a>(text: &'a str, highlights: &[std::ops::Range<usize>]) -> Vec<&'a str> {
+    highlights
+        .iter()
+        .map(|range| &text[range.clone()])
+        .collect()
+}
+
+/// The one row whose two sides are both changed: a line edited in place.
+fn edited_row(diff: &FileDiff) -> (ColumnLine, ColumnLine) {
+    let FileDiff::TwoColumn(rows) = diff else {
+        panic!("expected a two-column diff, got {diff:?}");
+    };
+    let mut edited = rows.iter().filter_map(|row| match (&row.old, &row.new) {
+        (Some(old), Some(new)) if old.changed && new.changed => Some((old.clone(), new.clone())),
+        _ => None,
+    });
+    let row = edited.next().expect("an edited row");
+    assert!(edited.next().is_none(), "only one edited row");
+    row
+}
+
+#[test]
+fn a_one_word_change_highlights_only_that_word() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", "fn total() {\n    price * count\n}\n")], "base");
+    repo.write("a.rs", "fn total() {\n    price * amount\n}\n");
+    let (store, repo_id) = open(&repo, two_columns());
+
+    let diff = diff_of(&store, repo_id, "a.rs", is_two_column);
+
+    let (old, new) = edited_row(&diff);
+    assert_eq!(highlighted(&old.text, &old.highlights), ["count"]);
+    assert_eq!(highlighted(&new.text, &new.highlights), ["amount"]);
+}
+
+#[test]
+fn the_inline_layout_highlights_the_changed_word_too() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", "let unit = \"cm\";\n")], "base");
+    repo.write("a.rs", "let unit = \"mm\";\n");
+    let (store, repo_id) = open(&repo, DiffOptions::default());
+
+    let diff = diff_of(&store, repo_id, "a.rs", |diff| {
+        matches!(diff, FileDiff::Text(_))
+    });
+
+    let FileDiff::Text(hunks) = &*diff else {
+        unreachable!("waited for a text diff")
+    };
+    let highlights: Vec<Vec<&str>> = hunks[0]
+        .lines
+        .iter()
+        .map(|line| highlighted(&line.text, &line.highlights))
+        .collect();
+    assert_eq!(highlights, [vec!["cm"], vec!["mm"]]);
+}
+
+#[test]
+fn lines_too_different_to_compare_highlight_all_between_their_common_ends() {
+    let old = "call(alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi);";
+    let new = "call(one two three four five six seven eight nine ten eleven twelve thirteen);";
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", &format!("{old}\n"))], "base");
+    repo.write("a.rs", &format!("{new}\n"));
+    let (store, repo_id) = open(&repo, two_columns());
+
+    let diff = diff_of(&store, repo_id, "a.rs", is_two_column);
+
+    let (old, new) = edited_row(&diff);
+    assert_eq!(
+        highlighted(&old.text, &old.highlights),
+        ["alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi"]
+    );
+    assert_eq!(
+        highlighted(&new.text, &new.highlights),
+        ["one two three four five six seven eight nine ten eleven twelve thirteen"]
+    );
+}

@@ -8,11 +8,12 @@ use std::sync::Arc;
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
 use tafit_core::{
     ChangeKind, FileChange, FileDiff, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
-    RepositoryStatus,
+    RepositoryStatus, WhitespaceMode,
 };
 use tafit_git_gix::GixBackend;
 use tafit_state::{
-    AppState, AppStore, ChangeGroup, Effect, FileRef, Msg, Page, SelectMode, WindowId, reduce,
+    AppState, AppStore, ChangeGroup, DiffLayout, DiffOptions, Effect, FileRef, Msg, Page,
+    SelectMode, WindowId, reduce,
 };
 use tafit_ui_gpui::TafitView;
 
@@ -445,6 +446,11 @@ fn the_new_window_button_opens_a_window_in_the_store(cx: &mut TestAppContext) {
 
 /// `state` with `a.txt` unstaged and selected, its diff read as `diff`.
 fn with_diff(diff: FileDiff) -> AppState {
+    with_diff_shown(diff, DiffOptions::default())
+}
+
+/// Like `with_diff`, with Line Diffs shown as `options` say.
+fn with_diff_shown(diff: FileDiff, options: DiffOptions) -> AppState {
     let mut state = with_status(
         state_with_open_repository(),
         RepositoryStatus {
@@ -453,6 +459,7 @@ fn with_diff(diff: FileDiff) -> AppState {
         },
     );
     let repo_id = state.active_repo().expect("a Repository is open");
+    reduce(&mut state, Msg::SetDiffOptions(options));
     let file = FileRef {
         group: ChangeGroup::Unstaged,
         path: "a.txt".to_owned(),
@@ -509,4 +516,78 @@ fn no_selected_file_shows_no_diff(cx: &mut TestAppContext) {
     let cx = render(state, cx);
 
     assert!(cx.debug_bounds("diff-empty").is_some(), "a hint to select");
+}
+
+/// One line edited in place, tab-indented, so its highlights sit past a tab.
+fn two_column_diff() -> FileDiff {
+    FileDiff::parse(b"@@ -1,2 +1,2 @@\n one\n-\ttwo x\n+\tTWO x\n")
+        .into_two_column(WhitespaceMode::Show)
+}
+
+#[gpui::test]
+fn the_two_column_layout_draws_old_beside_new(cx: &mut TestAppContext) {
+    let options = DiffOptions {
+        layout: DiffLayout::TwoColumn,
+        ..DiffOptions::default()
+    };
+
+    let cx = render(with_diff_shown(two_column_diff(), options), cx);
+
+    assert!(
+        cx.debug_bounds("diff-column-row").is_some(),
+        "rows of both sides"
+    );
+    assert!(cx.debug_bounds("diff-line").is_none(), "no inline lines");
+}
+
+#[gpui::test]
+fn without_sync_scroll_each_column_scrolls_on_its_own(cx: &mut TestAppContext) {
+    let options = DiffOptions {
+        layout: DiffLayout::TwoColumn,
+        sync_scroll: false,
+        word_wrap: true,
+        ..DiffOptions::default()
+    };
+
+    let cx = render(with_diff_shown(two_column_diff(), options), cx);
+
+    assert!(
+        cx.debug_bounds("diff-old-column").is_some(),
+        "the old column's list"
+    );
+    assert!(
+        cx.debug_bounds("diff-new-column").is_some(),
+        "the new column's list"
+    );
+}
+
+#[gpui::test]
+fn the_diff_toolbar_changes_how_diffs_are_shown(cx: &mut TestAppContext) {
+    let options = DiffOptions {
+        layout: DiffLayout::TwoColumn,
+        ..DiffOptions::default()
+    };
+    let (store, cx) = render_with_store(with_diff_shown(two_column_diff(), options), cx);
+    let click = |cx: &mut VisualTestContext, selector: &'static str| {
+        let button = cx.debug_bounds(selector).expect("the button is drawn");
+        cx.simulate_click(button.center(), Modifiers::none());
+        store.flush();
+    };
+
+    click(cx, "diff-ignore-whitespace");
+    click(cx, "diff-word-wrap");
+    click(cx, "diff-tab-size");
+    click(cx, "diff-sync-scroll");
+    click(cx, "diff-inline");
+
+    assert_eq!(
+        store.snapshot().diff_options,
+        DiffOptions {
+            layout: DiffLayout::Inline,
+            whitespace: WhitespaceMode::Ignore,
+            word_wrap: true,
+            tab_size: 8,
+            sync_scroll: false,
+        }
+    );
 }

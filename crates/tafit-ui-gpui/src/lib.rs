@@ -1,6 +1,7 @@
 //! The GPUI host: opens a GPUI window per store Window and draws `AppState`
 //! snapshots. Holds no app state of its own (only which GPUI window shows
-//! which store Window); every change goes through the store.
+//! which store Window, and where lists are scrolled); every change goes
+//! through the store.
 
 mod diff_view;
 mod host;
@@ -17,7 +18,7 @@ use gpui::{
 };
 use tafit_core::{GitEnvironment, GitError, GitVersion, Head};
 use tafit_state::{
-    AppState, AppStore, Loadable, Msg, Page, RepoId, RepoState, StoreEvents, WindowId,
+    AppState, AppStore, DiffOptions, Loadable, Msg, Page, RepoId, RepoState, StoreEvents, WindowId,
 };
 use tafit_ui_kit::text::{TextChanged, TextState, bind_text_keys, new_text_state};
 use tafit_ui_kit::{Theme, button, fonts, tab_bar};
@@ -107,6 +108,8 @@ pub struct TafitView {
     /// The Repository Tab and commit count the box last took its text from.
     commit_message_source: Option<(RepoId, u64)>,
     _commit_message_edits: Subscription,
+    /// The diff's scroll position; the only state the view keeps itself.
+    diff_lists: diff_view::DiffLists,
 }
 
 impl TafitView {
@@ -132,6 +135,7 @@ impl TafitView {
             commit_message,
             commit_message_source: None,
             _commit_message_edits: edits,
+            diff_lists: diff_view::DiffLists::default(),
         };
         view.sync_commit_message(cx);
         view
@@ -214,10 +218,16 @@ impl Render for TafitView {
             }
             (_, None) => open_repository::open_repository_page(state, self.window, theme, cx)
                 .into_any_element(),
-            (_, Some(repo)) => {
-                repository_tab_body(repo, &self.store, &self.commit_message, theme, cx)
-                    .into_any_element()
-            }
+            (_, Some(repo)) => repository_tab_body(
+                repo,
+                state.diff_options,
+                &mut self.diff_lists,
+                &self.store,
+                &self.commit_message,
+                theme,
+                cx,
+            )
+            .into_any_element(),
         };
         div()
             .size_full()
@@ -429,8 +439,11 @@ fn setting_row(
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn repository_tab_body(
     repo: &RepoState,
+    diff_options: DiffOptions,
+    diff_lists: &mut diff_view::DiffLists,
     store: &Arc<AppStore>,
     commit_message: &Entity<TextState>,
     theme: &Theme,
@@ -477,7 +490,13 @@ fn repository_tab_body(
                     .child(div().w(px(380.)).flex_none().flex().flex_col().child(
                         status_panel::status_panel(repo, store, commit_message, theme, cx),
                     ))
-                    .child(diff_view::diff_view(repo, theme)),
+                    .child(diff_view::diff_view(
+                        repo,
+                        diff_options,
+                        diff_lists,
+                        theme,
+                        cx,
+                    )),
             )
             .into_any_element(),
     }

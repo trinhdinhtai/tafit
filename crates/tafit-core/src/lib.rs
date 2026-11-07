@@ -92,6 +92,26 @@ pub enum DiffContext {
     WholeFile,
 }
 
+/// Whether a Line Diff counts changes in whitespace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WhitespaceMode {
+    #[default]
+    Show,
+    /// Lines that differ only in whitespace are the same line, as with
+    /// `git diff --ignore-all-space`.
+    Ignore,
+}
+
+impl WhitespaceMode {
+    /// What two lines are compared by: the line, or it without whitespace.
+    fn key(self, text: &str) -> String {
+        match self {
+            Self::Show => text.to_owned(),
+            Self::Ignore => text.chars().filter(|c| !c.is_whitespace()).collect(),
+        }
+    }
+}
+
 /// A Line Diff of one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDiff {
@@ -132,8 +152,9 @@ impl FileDiff {
     /// Lays a `DiffContext::WholeFile` diff out in two columns, aligned by
     /// tafit: lines unique to both sides anchor the alignment (patience),
     /// Myers aligns between them. A changed line beside a changed line is a
-    /// line edited in place. A binary diff stays as it is.
-    pub fn into_two_column(self) -> Self {
+    /// line edited in place. With `WhitespaceMode::Ignore`, lines that differ
+    /// only in whitespace align as unchanged. A binary diff stays as it is.
+    pub fn into_two_column(self, whitespace: WhitespaceMode) -> Self {
         let Self::Text(hunks) = self else {
             return self;
         };
@@ -161,19 +182,24 @@ impl FileDiff {
         let ids = |lines: &[ColumnLine], interner: &mut align::Interner<String>| -> Vec<u32> {
             lines
                 .iter()
-                .map(|line| interner.id(line.text.clone()))
+                .map(|line| interner.id(whitespace.key(&line.text)))
                 .collect()
         };
         let old_ids = ids(&old, &mut interner);
         let new_ids = ids(&new, &mut interner);
         let ops = align::align_lines(&old_ids, &new_ids);
-        Self::TwoColumn(column_rows(old, new, &ops))
+        Self::TwoColumn(column_rows(old, new, &ops, whitespace))
     }
 }
 
 /// Lays `old` and `new` out by `ops`; each run of deleted and inserted lines
 /// between equal ones is paired up row by row.
-fn column_rows(old: Vec<ColumnLine>, new: Vec<ColumnLine>, ops: &[align::Op]) -> Vec<ColumnRow> {
+fn column_rows(
+    old: Vec<ColumnLine>,
+    new: Vec<ColumnLine>,
+    ops: &[align::Op],
+    whitespace: WhitespaceMode,
+) -> Vec<ColumnRow> {
     let mut rows = Vec::with_capacity(ops.len());
     let (mut old, mut new) = (old.into_iter(), new.into_iter());
     let (mut deleted, mut inserted) = (Vec::new(), Vec::new());
@@ -185,7 +211,8 @@ fn column_rows(old: Vec<ColumnLine>, new: Vec<ColumnLine>, ops: &[align::Op]) ->
         for _ in 0..pairs {
             let (mut old, mut new) = (d.next(), i.next());
             if let (Some(old), Some(new)) = (&mut old, &mut new) {
-                (old.highlights, new.highlights) = highlight::changed_ranges(&old.text, &new.text);
+                (old.highlights, new.highlights) =
+                    highlight::changed_ranges(&old.text, &new.text, whitespace);
             }
             rows.push(ColumnRow { old, new });
         }
@@ -281,8 +308,9 @@ impl FileDiff {
 
     /// Highlights what changed within lines: in each run of removed lines
     /// followed by added ones, the first removed line pairs with the first
-    /// added one, the second with the second, and so on.
-    pub fn with_highlights(mut self) -> Self {
+    /// added one, the second with the second, and so on. With
+    /// `WhitespaceMode::Ignore`, whitespace is never highlighted as changed.
+    pub fn with_highlights(mut self, whitespace: WhitespaceMode) -> Self {
         if let Self::Text(hunks) = &mut self {
             for hunk in hunks {
                 let mut ix = 0;
@@ -297,8 +325,11 @@ impl FileDiff {
                         .count();
                     for pair in 0..removed.min(added) {
                         let (old, new) = (ix + pair, ix + removed + pair);
-                        let (old_ranges, new_ranges) =
-                            highlight::changed_ranges(&hunk.lines[old].text, &hunk.lines[new].text);
+                        let (old_ranges, new_ranges) = highlight::changed_ranges(
+                            &hunk.lines[old].text,
+                            &hunk.lines[new].text,
+                            whitespace,
+                        );
                         hunk.lines[old].highlights = old_ranges;
                         hunk.lines[new].highlights = new_ranges;
                     }
@@ -529,6 +560,7 @@ pub trait GitRepository: Send + Sync {
     fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError>;
 
     /// The Line Diff of one file from `source`, read from `git diff` with a
+    /// `context` and `whitespace` mode chosen by tafit and otherwise a
     /// fixed config so the user's (external diff, color, quotepath) can't
     /// change it (ADR-0002). `paths` is the file's repo-relative path, or a
     /// rename's old path then new path.
@@ -537,6 +569,7 @@ pub trait GitRepository: Send + Sync {
         source: DiffSource,
         paths: &[String],
         context: DiffContext,
+        whitespace: WhitespaceMode,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError>;
 

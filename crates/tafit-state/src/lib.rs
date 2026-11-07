@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tafit_core::{
     ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, RepositoryInfo,
-    RepositoryStatus,
+    RepositoryStatus, WhitespaceMode,
 };
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
@@ -67,6 +67,7 @@ pub enum DiffLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiffOptions {
     pub layout: DiffLayout,
+    pub whitespace: WhitespaceMode,
     /// Long lines wrap instead of being cut off.
     pub word_wrap: bool,
     /// Columns a tab advances to the next multiple of.
@@ -79,6 +80,7 @@ impl Default for DiffOptions {
     fn default() -> Self {
         Self {
             layout: DiffLayout::default(),
+            whitespace: WhitespaceMode::default(),
             word_wrap: false,
             tab_size: 4,
             sync_scroll: true,
@@ -196,7 +198,7 @@ impl RepoState {
     /// Points the diff at the one selected file, reading it if it is new or
     /// `reread` (its content, or how it is laid out, may have changed).
     /// `None` when nothing is read.
-    fn sync_diff(&mut self, reread: bool, layout: DiffLayout) -> Option<Effect> {
+    fn sync_diff(&mut self, reread: bool, options: DiffOptions) -> Option<Effect> {
         let Loadable::Ready(status) = &self.status else {
             self.diff = None;
             return None;
@@ -240,7 +242,8 @@ impl RepoState {
                 ChangeGroup::Untracked => DiffSource::Untracked,
             },
             paths,
-            layout,
+            layout: options.layout,
+            whitespace: options.whitespace,
         })
     }
 
@@ -556,8 +559,9 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<(), GitError>,
     },
-    /// Change how Line Diffs are shown. A new layout re-reads the diffs
-    /// shown, which keep their previous result until it lands.
+    /// Change how Line Diffs are shown. A new layout or whitespace mode
+    /// re-reads the diffs shown, which keep their previous result until it
+    /// lands.
     SetDiffOptions(DiffOptions),
     /// Result of `Effect::LoadDiff`.
     DiffLoaded {
@@ -620,6 +624,7 @@ pub enum Effect {
         /// The file, or a rename's old path then new path.
         paths: Vec<String>,
         layout: DiffLayout,
+        whitespace: WhitespaceMode,
     },
     /// Re-read what HEAD points at (after a commit moved it).
     LoadInfo {
@@ -754,7 +759,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             request,
             result,
         } => {
-            let layout = state.diff_options.layout;
+            let options = state.diff_options;
             // Only the latest read counts; an older one finishing late is stale.
             if let Some(repo) = state.repo_mut(repo_id)
                 && request == repo.status_request
@@ -783,7 +788,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 // The file shown may have changed along with the list.
                 // shortcut: re-read even when it didn't; one `git diff` per
                 // refresh until file watching (#13) says which files changed.
-                return repo.sync_diff(true, layout).into_iter().collect();
+                return repo.sync_diff(true, options).into_iter().collect();
             }
             Vec::new()
         }
@@ -804,15 +809,15 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::SetDiffOptions(options) => {
-            let relayout = options.layout != state.diff_options.layout;
+            let old = state.diff_options;
             state.diff_options = options;
-            if !relayout {
+            if (options.layout, options.whitespace) == (old.layout, old.whitespace) {
                 return Vec::new();
             }
             state
                 .repos
                 .iter_mut()
-                .filter_map(|repo| repo.sync_diff(true, options.layout))
+                .filter_map(|repo| repo.sync_diff(true, options))
                 .collect()
         }
         Msg::RefreshStatus(repo_id) => match state.repo_mut(repo_id) {
@@ -847,7 +852,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             file,
             mode,
         } => {
-            let layout = state.diff_options.layout;
+            let options = state.diff_options;
             if let Some(repo) = state.repo_mut(repo_id) {
                 match mode {
                     SelectMode::Only => {
@@ -860,7 +865,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                         }
                     }
                 }
-                return repo.sync_diff(false, layout).into_iter().collect();
+                return repo.sync_diff(false, options).into_iter().collect();
             }
             Vec::new()
         }

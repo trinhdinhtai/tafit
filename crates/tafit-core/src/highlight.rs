@@ -3,6 +3,7 @@
 
 use std::ops::Range;
 
+use crate::WhitespaceMode;
 use crate::align::{Interner, Op, myers};
 
 /// Tokens of one line, past its common prefix and suffix, compared token by
@@ -15,17 +16,23 @@ const MAX_TOKENS: usize = 500;
 const MAX_TOKEN_COST: usize = 16;
 
 /// The byte ranges that changed in `old` and in `new`, a line edited into
-/// the other. Adjacent changed tokens make one range.
-pub(crate) fn changed_ranges(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
-    let (old_tokens, new_tokens) = (tokens(old), tokens(new));
+/// the other. Adjacent changed tokens make one range. With
+/// `WhitespaceMode::Ignore`, whitespace is left out of the comparison, so it
+/// is never highlighted on its own.
+pub(crate) fn changed_ranges(
+    old: &str,
+    new: &str,
+    whitespace: WhitespaceMode,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let (old_tokens, new_tokens) = (tokens(old, whitespace), tokens(new, whitespace));
     let mut interner = Interner::new();
     let old_ids: Vec<u32> = old_tokens
         .iter()
-        .map(|t| interner.id(&old[t.clone()]))
+        .map(|token| interner.id(&old[token.clone()]))
         .collect();
     let new_ids: Vec<u32> = new_tokens
         .iter()
-        .map(|t| interner.id(&new[t.clone()]))
+        .map(|token| interner.id(&new[token.clone()]))
         .collect();
 
     let prefix = old_ids
@@ -91,8 +98,9 @@ fn push_merged(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
 }
 
 /// Splits `line` into words (letters, digits, `_`), runs of whitespace, and
-/// single other characters, as byte ranges.
-fn tokens(line: &str) -> Vec<Range<usize>> {
+/// single other characters, as byte ranges. With `WhitespaceMode::Ignore`,
+/// the runs of whitespace are left out.
+fn tokens(line: &str, whitespace: WhitespaceMode) -> Vec<Range<usize>> {
     #[derive(PartialEq)]
     enum Class {
         Word,
@@ -118,6 +126,9 @@ fn tokens(line: &str) -> Vec<Range<usize>> {
             _ => tokens.push(at..at + c.len_utf8()),
         }
         previous = Some(current);
+    }
+    if whitespace == WhitespaceMode::Ignore {
+        tokens.retain(|token| !line[token.clone()].trim().is_empty());
     }
     tokens
 }

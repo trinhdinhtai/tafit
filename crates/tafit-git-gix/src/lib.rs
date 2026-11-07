@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tafit_core::{
     CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError,
-    GitRepository, Head, RepositoryInfo, RepositoryStatus,
+    GitRepository, Head, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 
 use crate::cli::GitCli;
@@ -154,6 +154,7 @@ impl GitRepository for GixRepository {
         source: DiffSource,
         paths: &[String],
         context: DiffContext,
+        whitespace: WhitespaceMode,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError> {
         let workdir = self.workdir.as_deref().ok_or_else(|| {
@@ -165,6 +166,7 @@ impl GitRepository for GixRepository {
             source,
             paths,
             context,
+            whitespace,
             cancel,
         )
     }

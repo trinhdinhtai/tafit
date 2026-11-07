@@ -6,7 +6,7 @@ mod support;
 use std::sync::Arc;
 
 use support::{TestRepo, TestStore};
-use tafit_core::{ColumnLine, FileDiff};
+use tafit_core::{ColumnLine, FileDiff, WhitespaceMode};
 use tafit_state::{
     AppState, ChangeGroup, DiffLayout, DiffOptions, FileRef, Loadable, Msg, RepoId, SelectMode,
     WindowId,
@@ -201,4 +201,73 @@ fn lines_too_different_to_compare_highlight_all_between_their_common_ends() {
         highlighted(&new.text, &new.highlights),
         ["one two three four five six seven eight nine ten eleven twelve thirteen"]
     );
+}
+
+#[test]
+fn ignoring_whitespace_keeps_a_reindented_line_unchanged_in_two_columns() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", "if ok {\nrun();\n}\nlet x = 1;\n")], "base");
+    repo.write("a.rs", "if ok {\n    run();\n}\nlet x = 2;\n");
+    let options = DiffOptions {
+        whitespace: WhitespaceMode::Ignore,
+        ..two_columns()
+    };
+    let (store, repo_id) = open(&repo, options);
+
+    let diff = diff_of(&store, repo_id, "a.rs", is_two_column);
+
+    assert_eq!(
+        rows(&diff),
+        [
+            "1 if ok { | 1 if ok {",
+            "2 run(); | 2     run();",
+            "3 } | 3 }",
+            "-4 let x = 1; | +4 let x = 2;",
+        ]
+    );
+}
+
+#[test]
+fn ignoring_whitespace_hides_a_whitespace_only_change_inline() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", "run();\n")], "base");
+    repo.write("a.rs", "    run( );\n");
+    let ignore = DiffOptions {
+        whitespace: WhitespaceMode::Ignore,
+        ..DiffOptions::default()
+    };
+    let (store, repo_id) = open(&repo, ignore);
+
+    let diff = diff_of(&store, repo_id, "a.rs", |diff| {
+        matches!(diff, FileDiff::Text(_))
+    });
+
+    assert_eq!(*diff, FileDiff::Text(Vec::new()));
+
+    store.dispatch(Msg::SetDiffOptions(DiffOptions::default()));
+    store.flush();
+    store.wait_until(|state| {
+        state
+            .active()
+            .and_then(|repo| repo.diff.as_ref())
+            .is_some_and(|diff| matches!(&diff.diff, Loadable::Ready(d) if matches!(&**d, FileDiff::Text(h) if !h.is_empty())))
+    });
+}
+
+#[test]
+fn ignoring_whitespace_never_highlights_spaces_within_an_edited_line() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.rs", "x = a+b;\n")], "base");
+    repo.write("a.rs", "x = a + c;\n");
+    let options = DiffOptions {
+        whitespace: WhitespaceMode::Ignore,
+        ..two_columns()
+    };
+    let (store, repo_id) = open(&repo, options);
+
+    let diff = diff_of(&store, repo_id, "a.rs", is_two_column);
+
+    let (old, new) = edited_row(&diff);
+    assert_eq!(highlighted(&old.text, &old.highlights), ["b"]);
+    assert_eq!(highlighted(&new.text, &new.highlights), ["c"]);
 }

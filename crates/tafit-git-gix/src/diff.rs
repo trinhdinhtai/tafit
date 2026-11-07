@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use tafit_core::{CancellationToken, DiffContext, DiffSource, FileDiff, GitError};
+use tafit_core::{CancellationToken, DiffContext, DiffSource, FileDiff, GitError, WhitespaceMode};
 
 use crate::cli::GitCli;
 
@@ -31,8 +31,13 @@ pub(crate) fn diff(
     source: DiffSource,
     paths: &[String],
     context: DiffContext,
+    whitespace: WhitespaceMode,
     cancel: &CancellationToken,
 ) -> Result<FileDiff, GitError> {
+    let whitespace_args: &[&str] = match whitespace {
+        WhitespaceMode::Show => &[],
+        WhitespaceMode::Ignore => &["--ignore-all-space"],
+    };
     let mut args: Vec<&str> = vec![
         "-c",
         "core.quotepath=false",
@@ -52,6 +57,7 @@ pub(crate) fn diff(
             if context == DiffContext::WholeFile {
                 args.push(WHOLE_FILE_CONTEXT);
             }
+            args.extend(whitespace_args);
             if source == DiffSource::Staged {
                 args.push("--cached");
             }
@@ -62,6 +68,7 @@ pub(crate) fn diff(
         }
         DiffSource::Untracked => {
             args.extend(DIFF_ARGS);
+            args.extend(whitespace_args);
             // An untracked file's one hunk is already the whole file.
             args.extend(["--no-index", "--", "/dev/null"]);
             args.extend(paths.iter().map(String::as_str));

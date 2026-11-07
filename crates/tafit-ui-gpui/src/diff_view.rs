@@ -53,6 +53,12 @@ pub(crate) fn diff_view(repo: &RepoState, theme: &Theme) -> impl IntoElement {
                     centered_message("No content changes", theme.text_muted).into_any_element()
                 }
                 FileDiff::Text(_) => lines(Arc::clone(loaded), *theme).into_any_element(),
+                // Nothing picks the two-column layout yet.
+                FileDiff::TwoColumn(_) => centered_message(
+                    "The two-column layout isn't drawn yet",
+                    theme.text_muted,
+                )
+                .into_any_element(),
             },
         },
     };

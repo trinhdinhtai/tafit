@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use tafit_core::{CancellationToken, DiffSource, FileDiff, GitError};
+use tafit_core::{CancellationToken, DiffContext, DiffSource, FileDiff, GitError};
 
 use crate::cli::GitCli;
 
@@ -20,11 +20,17 @@ const DIFF_ARGS: &[&str] = &[
     "--dst-prefix=b/",
 ];
 
+/// Context large enough to cover any file, so the one hunk is the whole
+/// file. Small enough that git's line arithmetic can't overflow a 32-bit
+/// `long` (Windows) for files under a billion lines.
+const WHOLE_FILE_CONTEXT: &str = "--unified=1000000000";
+
 pub(crate) fn diff(
     git: &GitCli,
     workdir: &Path,
     source: DiffSource,
     paths: &[String],
+    context: DiffContext,
     cancel: &CancellationToken,
 ) -> Result<FileDiff, GitError> {
     let mut args: Vec<&str> = vec![
@@ -43,6 +49,9 @@ pub(crate) fn diff(
             // A name like `*.txt` is a file, not a glob.
             args.insert(0, "--literal-pathspecs");
             args.extend(DIFF_ARGS);
+            if context == DiffContext::WholeFile {
+                args.push(WHOLE_FILE_CONTEXT);
+            }
             if source == DiffSource::Staged {
                 args.push("--cached");
             }
@@ -53,6 +62,7 @@ pub(crate) fn diff(
         }
         DiffSource::Untracked => {
             args.extend(DIFF_ARGS);
+            // An untracked file's one hunk is already the whole file.
             args.extend(["--no-index", "--", "/dev/null"]);
             args.extend(paths.iter().map(String::as_str));
             let output = git.output(Some(workdir), &args, cancel)?;

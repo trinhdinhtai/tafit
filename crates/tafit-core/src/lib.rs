@@ -1,5 +1,7 @@
 //! Domain types and the Git backend interface. Never depends on GPUI.
 
+mod align;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,13 +80,137 @@ pub enum DiffSource {
     Untracked,
 }
 
+/// How much of a file a diff read covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffContext {
+    /// The changed lines with a few lines of context around them, as git
+    /// shows hunks by default.
+    Hunks,
+    /// Every line of the file, as one hunk; for aligning the whole file.
+    WholeFile,
+}
+
 /// A Line Diff of one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDiff {
     /// The hunks, in file order; none when only the mode changed.
     Text(Vec<Hunk>),
+    /// The whole file in two columns, old beside new, aligned by tafit
+    /// rather than git; empty when no line changed.
+    TwoColumn(Vec<ColumnRow>),
     /// git found binary content; there is nothing to show line by line.
     Binary,
+}
+
+/// One row of a two-column diff: a line of each side that sit side by side.
+/// A side is `None` where the other side's line has no counterpart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnRow {
+    pub old: Option<ColumnLine>,
+    pub new: Option<ColumnLine>,
+}
+
+/// One side's line in a `ColumnRow`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnLine {
+    /// 1-based, in that side's file.
+    pub number: u32,
+    /// The line without its line ending.
+    pub text: String,
+    /// The line is removed (old side) or added (new side).
+    pub changed: bool,
+    /// The file ends here without a newline.
+    pub no_newline_at_end: bool,
+}
+
+impl FileDiff {
+    /// Lays a `DiffContext::WholeFile` diff out in two columns, aligned by
+    /// tafit: lines unique to both sides anchor the alignment (patience),
+    /// Myers aligns between them. A changed line beside a changed line is a
+    /// line edited in place. A binary diff stays as it is.
+    pub fn into_two_column(self) -> Self {
+        let Self::Text(hunks) = self else {
+            return self;
+        };
+        let lines = hunks.into_iter().flat_map(|hunk| hunk.lines);
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        for line in lines {
+            let side = |number: Option<u32>| ColumnLine {
+                number: number.unwrap_or_default(),
+                text: line.text.clone(),
+                changed: line.kind != LineKind::Context,
+                no_newline_at_end: line.no_newline_at_end,
+            };
+            if line.kind != LineKind::Added {
+                old.push(side(line.old_line));
+            }
+            if line.kind != LineKind::Removed {
+                new.push(side(line.new_line));
+            }
+        }
+        if old.iter().chain(&new).all(|line| !line.changed) {
+            return Self::TwoColumn(Vec::new());
+        }
+        let mut interner = align::Interner::new();
+        let ids = |lines: &[ColumnLine], interner: &mut align::Interner<String>| -> Vec<u32> {
+            lines
+                .iter()
+                .map(|line| interner.id(line.text.clone()))
+                .collect()
+        };
+        let old_ids = ids(&old, &mut interner);
+        let new_ids = ids(&new, &mut interner);
+        let ops = align::align_lines(&old_ids, &new_ids);
+        Self::TwoColumn(column_rows(old, new, &ops))
+    }
+}
+
+/// Lays `old` and `new` out by `ops`; each run of deleted and inserted lines
+/// between equal ones is paired up row by row.
+fn column_rows(old: Vec<ColumnLine>, new: Vec<ColumnLine>, ops: &[align::Op]) -> Vec<ColumnRow> {
+    let mut rows = Vec::with_capacity(ops.len());
+    let (mut old, mut new) = (old.into_iter(), new.into_iter());
+    let (mut deleted, mut inserted) = (Vec::new(), Vec::new());
+    let flush = |rows: &mut Vec<ColumnRow>,
+                 deleted: &mut Vec<ColumnLine>,
+                 inserted: &mut Vec<ColumnLine>| {
+        let pairs = deleted.len().max(inserted.len());
+        let (mut d, mut i) = (deleted.drain(..), inserted.drain(..));
+        for _ in 0..pairs {
+            rows.push(ColumnRow {
+                old: d.next(),
+                new: i.next(),
+            });
+        }
+    };
+    for op in ops {
+        match op {
+            align::Op::Equal => {
+                flush(&mut rows, &mut deleted, &mut inserted);
+                let line = |side: &mut std::vec::IntoIter<ColumnLine>| {
+                    let mut line = side.next().expect("the ops cover both sides");
+                    line.changed = false;
+                    line
+                };
+                rows.push(ColumnRow {
+                    old: Some(line(&mut old)),
+                    new: Some(line(&mut new)),
+                });
+            }
+            align::Op::Delete => {
+                let mut line = old.next().expect("the ops cover the old side");
+                line.changed = true;
+                deleted.push(line);
+            }
+            align::Op::Insert => {
+                let mut line = new.next().expect("the ops cover the new side");
+                line.changed = true;
+                inserted.push(line);
+            }
+        }
+    }
+    flush(&mut rows, &mut deleted, &mut inserted);
+    rows
 }
 
 impl FileDiff {
@@ -368,6 +494,7 @@ pub trait GitRepository: Send + Sync {
         &self,
         source: DiffSource,
         paths: &[String],
+        context: DiffContext,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError>;
 

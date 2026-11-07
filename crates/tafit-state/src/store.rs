@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::thread;
 
-use tafit_core::{CancellationToken, GitBackend};
+use tafit_core::{CancellationToken, DiffContext, FileDiff, GitBackend};
 
-use crate::{AppState, Effect, Msg, RepoId, reduce};
+use crate::{AppState, DiffLayout, Effect, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -173,15 +173,20 @@ impl StoreWorker {
                 path,
                 source,
                 paths,
+                layout,
             } => {
                 let read = CancellationToken::default();
                 if let Some(older) = self.diff_reads.insert(repo_id, read.clone()) {
                     older.cancel();
                 }
                 self.repo_load.execute(move || {
-                    let result = backend
-                        .open(&path, &read)
-                        .and_then(|repo| repo.diff(source, &paths, &read));
+                    let result = backend.open(&path, &read).and_then(|repo| match layout {
+                        DiffLayout::Inline => repo.diff(source, &paths, DiffContext::Hunks, &read),
+                        // Aligned here, off the store thread.
+                        DiffLayout::TwoColumn => repo
+                            .diff(source, &paths, DiffContext::WholeFile, &read)
+                            .map(FileDiff::into_two_column),
+                    });
                     let _ = commands.send(Command::Msg(Msg::DiffLoaded {
                         repo_id,
                         request,

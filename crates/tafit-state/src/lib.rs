@@ -17,7 +17,7 @@ pub use store::{AppStore, StoreEvent, StoreEvents};
 
 /// Identifies one opened Repository for the lifetime of the store; never reused,
 /// so a result for a closed Repository can't land on a newer one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepoId(u64);
 
 impl RepoId {
@@ -50,6 +50,108 @@ pub struct StatusRequestId(u64);
 /// file, or of the same file before it changed) can't replace a newer one's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DiffRequestId(u64);
+
+/// Identifies one watch of a Repository, so what an older watch reports
+/// after it stopped can't land on a newer one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WatchSession(u64);
+
+/// What a batch of changes made outside the app touched, so only the parts
+/// of a Repository it affects are re-read.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeFlags(u8);
+
+impl ChangeFlags {
+    /// A file in the work tree that git doesn't ignore.
+    pub const WORKTREE: Self = Self(1);
+    /// The index.
+    pub const INDEX: Self = Self(1 << 1);
+    /// HEAD, a branch, or an operation in progress (merge, rebase, ...).
+    pub const GIT_STATE: Self = Self(1 << 2);
+    pub const TAG: Self = Self(1 << 3);
+    /// git config or ignore rules outside the work tree (`info/exclude`).
+    pub const CONFIG: Self = Self(1 << 4);
+    pub const ALL: Self = Self(0b1_1111);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for ChangeFlags {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl std::ops::BitOrAssign for ChangeFlags {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl std::fmt::Debug for ChangeFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = [
+            (Self::WORKTREE, "WORKTREE"),
+            (Self::INDEX, "INDEX"),
+            (Self::GIT_STATE, "GIT_STATE"),
+            (Self::TAG, "TAG"),
+            (Self::CONFIG, "CONFIG"),
+        ];
+        let set: Vec<_> = names
+            .iter()
+            .filter(|(flag, _)| self.contains(*flag))
+            .map(|(_, name)| *name)
+            .collect();
+        write!(f, "ChangeFlags({})", set.join(" | "))
+    }
+}
+
+/// Changes made outside the app to a watched Repository, gathered over one
+/// batch of file events.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExternalChanges {
+    pub flags: ChangeFlags,
+    /// The changed work tree files, repo-relative with `/` separators;
+    /// `None` when not known one by one (too many, or events were lost).
+    pub files: Option<BTreeSet<String>>,
+}
+
+impl ExternalChanges {
+    /// Anything may have changed: re-read it all.
+    pub fn everything() -> Self {
+        Self {
+            flags: ChangeFlags::ALL,
+            files: None,
+        }
+    }
+}
+
+/// How a Repository's files are watched for changes made outside the app.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Watch {
+    /// Not watched: it isn't an Active Repository, or isn't open. Changes
+    /// made meanwhile are read when it next becomes active.
+    #[default]
+    Off,
+    /// The watch is being set up.
+    Starting,
+    Watching,
+    /// Some or all of it can't be watched, for this reason. Until a retry
+    /// succeeds, the Repository is re-read every so often instead.
+    Degraded(String),
+}
 
 /// How a Line Diff is laid out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,6 +322,13 @@ pub struct RepoState {
     /// Lines waiting for the user to confirm their Discard, which git can't
     /// undo (`Msg::ConfirmDiscard`, `Msg::CancelDiscard`).
     pub confirm_discard: Option<LineChange>,
+    /// Whether changes made outside the app are seen as they happen.
+    pub watch: Watch,
+    /// The latest watch; only what it reports counts.
+    watch_session: WatchSession,
+    /// The shown diff may have changed: re-read it once the latest status
+    /// read lands.
+    reread_diff: bool,
 }
 
 impl RepoState {
@@ -242,6 +351,56 @@ impl RepoState {
             diff_request: DiffRequestId::default(),
             diff_requested_with: Default::default(),
             confirm_discard: None,
+            watch: Watch::Off,
+            watch_session: WatchSession::default(),
+            reread_diff: false,
+        }
+    }
+
+    /// Re-reads what `changes` may have changed. Nothing is read for a
+    /// Repository that isn't open.
+    fn read_changes(&mut self, changes: &ExternalChanges) -> Vec<Effect> {
+        if !matches!(self.open, Loadable::Ready(_)) {
+            return Vec::new();
+        }
+        let mut effects = Vec::new();
+        let status_flags = ChangeFlags::WORKTREE
+            | ChangeFlags::INDEX
+            | ChangeFlags::GIT_STATE
+            | ChangeFlags::CONFIG;
+        if changes.flags.intersects(status_flags) {
+            let reread_diff = self.diff_changed(changes);
+            effects.push(self.request_status(reread_diff));
+        }
+        if changes.flags.contains(ChangeFlags::GIT_STATE) {
+            effects.push(Effect::LoadInfo {
+                repo_id: self.id,
+                path: self.path.clone(),
+            });
+        }
+        // shortcut: nothing shows tags yet; the history (#14) will re-read
+        // them on `ChangeFlags::TAG`.
+        effects
+    }
+
+    /// Whether `changes` may have changed the shown diff.
+    fn diff_changed(&self, changes: &ExternalChanges) -> bool {
+        let Some(diff) = &self.diff else {
+            return false;
+        };
+        if changes
+            .flags
+            .intersects(ChangeFlags::INDEX | ChangeFlags::GIT_STATE | ChangeFlags::CONFIG)
+        {
+            return true;
+        }
+        // HEAD against the index doesn't change with the work tree.
+        if diff.file.group == ChangeGroup::Staged {
+            return false;
+        }
+        match &changes.files {
+            Some(files) => diff.paths.iter().any(|path| files.contains(path)),
+            None => true,
         }
     }
 
@@ -411,11 +570,14 @@ impl RepoState {
     fn finish_write(&mut self, result: Result<(), GitError>) -> Effect {
         self.write_settling = true;
         self.write_error = result.err().map(|err| err.to_string());
-        self.request_status()
+        self.request_status(true)
     }
 
-    /// Starts a new status read, superseding any still running.
-    fn request_status(&mut self) -> Effect {
+    /// Starts a new status read, superseding any still running; the shown
+    /// diff is re-read after it if `reread_diff` (or a superseded read
+    /// asked for that).
+    fn request_status(&mut self, reread_diff: bool) -> Effect {
+        self.reread_diff |= reread_diff;
         self.status_request = StatusRequestId(self.status_request.0 + 1);
         self.status_refreshing = true;
         Effect::LoadStatus {
@@ -497,6 +659,9 @@ pub struct AppState {
     pub git: Loadable<GitEnvironment, GitError>,
     /// The latest `Msg::DetectGit`; only its result is kept.
     git_request: GitRequestId,
+    /// The Repositories being watched, by id.
+    watched: BTreeSet<RepoId>,
+    next_watch_session: u64,
     next_repo_id: u64,
     next_window_id: u64,
 }
@@ -512,6 +677,8 @@ impl Default for AppState {
             diff_options: DiffOptions::default(),
             git: Loadable::default(),
             git_request: GitRequestId::default(),
+            watched: BTreeSet::new(),
+            next_watch_session: 0,
             next_repo_id: 0,
             next_window_id: WindowId::FIRST.0 + 1,
         }
@@ -568,6 +735,52 @@ impl AppState {
 
     fn window_mut(&mut self, id: WindowId) -> Option<&mut WindowState> {
         self.windows.iter_mut().find(|window| window.id == id)
+    }
+
+    /// Watches each Window's Active Repository once it is open and stops
+    /// watching the rest. A Repository watched again is re-read: it may have
+    /// changed while it wasn't watched.
+    fn sync_watches(&mut self) -> Vec<Effect> {
+        let wanted: BTreeSet<RepoId> = self
+            .windows
+            .iter()
+            .filter_map(|window| window.active_repo)
+            .filter(|&id| {
+                self.repo(id)
+                    .is_some_and(|repo| matches!(repo.open, Loadable::Ready(_)))
+            })
+            .collect();
+        if wanted == self.watched {
+            return Vec::new();
+        }
+        let mut effects = Vec::new();
+        for &repo_id in self.watched.difference(&wanted) {
+            effects.push(Effect::Unwatch { repo_id });
+        }
+        let started: Vec<RepoId> = wanted.difference(&self.watched).copied().collect();
+        for repo in &mut self.repos {
+            if !wanted.contains(&repo.id) {
+                repo.watch = Watch::Off;
+            }
+        }
+        for repo_id in started {
+            let session = WatchSession(self.next_watch_session);
+            self.next_watch_session += 1;
+            let repo = self.repo_mut(repo_id).expect("a wanted Repository is open");
+            repo.watch = Watch::Starting;
+            repo.watch_session = session;
+            effects.push(Effect::Watch {
+                repo_id,
+                session,
+                path: repo.path.clone(),
+            });
+            // A first status read is still running when it has just opened.
+            if !matches!(repo.status, Loadable::Loading) {
+                effects.extend(repo.read_changes(&ExternalChanges::everything()));
+            }
+        }
+        self.watched = wanted;
+        effects
     }
 
     /// The Window holding `repo`'s tab.
@@ -700,6 +913,19 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<RepositoryInfo, GitError>,
     },
+    /// A watch started by `Effect::Watch` is set up, degraded or recovered.
+    WatchChanged {
+        repo_id: RepoId,
+        session: WatchSession,
+        watch: Watch,
+    },
+    /// A watch started by `Effect::Watch` saw changes made outside the app;
+    /// what they touched is re-read.
+    FilesChanged {
+        repo_id: RepoId,
+        session: WatchSession,
+        changes: ExternalChanges,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -765,12 +991,52 @@ pub enum Effect {
         repo_id: RepoId,
         path: PathBuf,
     },
+    /// Watch the Repository's files for changes made outside the app,
+    /// reporting with `Msg::WatchChanged` and `Msg::FilesChanged`.
+    Watch {
+        repo_id: RepoId,
+        session: WatchSession,
+        path: PathBuf,
+    },
+    /// Stop watching the Repository.
+    Unwatch {
+        repo_id: RepoId,
+    },
 }
 
 /// The pure reducer. Also the store's synchronous mode: tests and benchmarks
 /// can drive an `AppState` directly and inspect the effects it asks for.
 pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
+    let mut effects = reduce_msg(state, msg);
+    effects.extend(state.sync_watches());
+    effects
+}
+
+fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     match msg {
+        Msg::WatchChanged {
+            repo_id,
+            session,
+            watch,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && repo.watch != Watch::Off
+                && repo.watch_session == session
+            {
+                repo.watch = watch;
+            }
+            Vec::new()
+        }
+        Msg::FilesChanged {
+            repo_id,
+            session,
+            changes,
+        } => match state.repo_mut(repo_id) {
+            Some(repo) if repo.watch != Watch::Off && repo.watch_session == session => {
+                repo.read_changes(&changes)
+            }
+            _ => Vec::new(),
+        },
         Msg::OpenRepo { window, path } => {
             if let Some(open) = state.repos.iter().find(|repo| repo.path == path) {
                 let repo_id = open.id;
@@ -875,7 +1141,7 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             match result {
                 Ok(info) => {
                     repo.open = Loadable::Ready(info);
-                    let effect = repo.request_status();
+                    let effect = repo.request_status(true);
                     let path = repo.path.clone();
                     state.recent.retain(|recent| *recent != path);
                     state.recent.insert(0, path);
@@ -920,9 +1186,8 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     repo.committing = false;
                 }
                 // The file shown may have changed along with the list.
-                // shortcut: re-read even when it didn't; one `git diff` per
-                // refresh until file watching (#13) says which files changed.
-                return repo.sync_diff(true, options).into_iter().collect();
+                let reread = std::mem::take(&mut repo.reread_diff);
+                return repo.sync_diff(reread, options).into_iter().collect();
             }
             Vec::new()
         }
@@ -1042,7 +1307,9 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         }
         Msg::RefreshStatus(repo_id) => match state.repo_mut(repo_id) {
             // An unopened Repository reads its status once it opens.
-            Some(repo) if matches!(repo.open, Loadable::Ready(_)) => vec![repo.request_status()],
+            Some(repo) if matches!(repo.open, Loadable::Ready(_)) => {
+                vec![repo.request_status(true)]
+            }
             _ => Vec::new(),
         },
         Msg::DetectGit => {

@@ -241,6 +241,8 @@ impl StoreWorker {
                     .and_then(|repo| repo.info(&cancel));
                 let _ = commands.send(Command::Msg(Msg::InfoLoaded { repo_id, result }));
             }),
+            // Nothing watches files yet; the Repository stays `Watch::Starting`.
+            Effect::Watch { .. } | Effect::Unwatch { .. } => {}
         }
     }
 }

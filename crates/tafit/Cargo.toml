@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = ["ui-gpui"]
 ui-gpui = ["tafit-app/ui-gpui"]
+ui-rune = ["tafit-app/ui-rune"]
 
 [dependencies]
 tafit-app = { workspace = true }

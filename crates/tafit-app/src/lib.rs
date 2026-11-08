@@ -38,14 +38,20 @@ fn repository_arg(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<
     std::path::absolute(&path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
-#[cfg(feature = "ui-gpui")]
+#[cfg(feature = "ui-rune")]
+fn run_ui(store: AppStore, events: StoreEvents) -> ExitCode {
+    tafit_ui_rune::run(Arc::new(store), events);
+    ExitCode::SUCCESS
+}
+
+#[cfg(all(feature = "ui-gpui", not(feature = "ui-rune")))]
 fn run_ui(store: AppStore, events: StoreEvents) -> ExitCode {
     tafit_ui_gpui::run(Arc::new(store), events);
     ExitCode::SUCCESS
 }
 
-#[cfg(not(feature = "ui-gpui"))]
+#[cfg(not(any(feature = "ui-gpui", feature = "ui-rune")))]
 fn run_ui(_store: AppStore, _events: StoreEvents) -> ExitCode {
-    eprintln!("{APP_NAME} was built without a UI (feature `ui-gpui`)");
+    eprintln!("{APP_NAME} was built without a UI (feature `ui-rune`)");
     ExitCode::FAILURE
 }

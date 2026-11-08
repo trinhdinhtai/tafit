@@ -7460,6 +7460,7 @@ dependencies = [
  "tafit-git-gix",
  "tafit-state",
  "tafit-ui-gpui",
+ "tafit-ui-rune",
 ]
 
 [[package]]
@@ -7542,6 +7543,7 @@ dependencies = [
  "rune-kit",
  "tafit-base",
  "tafit-core",
+ "tafit-git-gix",
  "tafit-state",
 ]
 

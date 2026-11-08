@@ -16,3 +16,6 @@ rune-kit = { workspace = true }
 tafit-base = { workspace = true }
 tafit-core = { workspace = true }
 tafit-state = { workspace = true }
+
+[dev-dependencies]
+tafit-git-gix = { workspace = true }

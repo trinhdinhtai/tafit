@@ -25,6 +25,11 @@ const DIFF_ARGS: &[&str] = &[
 /// `long` (Windows) for files under a billion lines.
 const WHOLE_FILE_CONTEXT: &str = "--unified=1000000000";
 
+/// The context a patch for a Line Selection is read with; git's default,
+/// fixed so a user's `diff.context=0` can't leave `git apply` nothing to
+/// place the hunks by.
+const PATCH_CONTEXT: &str = "--unified=3";
+
 pub(crate) fn diff(
     git: &GitCli,
     workdir: &Path,
@@ -34,10 +39,38 @@ pub(crate) fn diff(
     whitespace: WhitespaceMode,
     cancel: &CancellationToken,
 ) -> Result<FileDiff, GitError> {
-    let whitespace_args: &[&str] = match whitespace {
-        WhitespaceMode::Show => &[],
-        WhitespaceMode::Ignore => &["--ignore-all-space"],
-    };
+    let mut options = Vec::new();
+    if context == DiffContext::WholeFile {
+        options.push(WHOLE_FILE_CONTEXT);
+    }
+    if whitespace == WhitespaceMode::Ignore {
+        options.push("--ignore-all-space");
+    }
+    let output = diff_output(git, workdir, source, paths, &options, cancel)?;
+    Ok(FileDiff::parse(&output))
+}
+
+/// `git diff` output of one file, for building a Line Selection's patch.
+pub(crate) fn diff_patch(
+    git: &GitCli,
+    workdir: &Path,
+    source: DiffSource,
+    paths: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, GitError> {
+    diff_output(git, workdir, source, paths, &[PATCH_CONTEXT], cancel)
+}
+
+/// Runs `git diff` for `source` with `options` (context and whitespace)
+/// and returns what it printed.
+fn diff_output(
+    git: &GitCli,
+    workdir: &Path,
+    source: DiffSource,
+    paths: &[String],
+    options: &[&str],
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, GitError> {
     let mut args: Vec<&str> = vec![
         "-c",
         "core.quotepath=false",
@@ -54,10 +87,7 @@ pub(crate) fn diff(
             // A name like `*.txt` is a file, not a glob.
             args.insert(0, "--literal-pathspecs");
             args.extend(DIFF_ARGS);
-            if context == DiffContext::WholeFile {
-                args.push(WHOLE_FILE_CONTEXT);
-            }
-            args.extend(whitespace_args);
+            args.extend(options);
             if source == DiffSource::Staged {
                 args.push("--cached");
             }
@@ -68,8 +98,12 @@ pub(crate) fn diff(
         }
         DiffSource::Untracked => {
             args.extend(DIFF_ARGS);
-            args.extend(whitespace_args);
             // An untracked file's one hunk is already the whole file.
+            args.extend(
+                options
+                    .iter()
+                    .filter(|option| **option != WHOLE_FILE_CONTEXT),
+            );
             args.extend(["--no-index", "--", "/dev/null"]);
             args.extend(paths.iter().map(String::as_str));
             let output = git.output(Some(workdir), &args, cancel)?;
@@ -85,5 +119,5 @@ pub(crate) fn diff(
             output
         }
     };
-    Ok(FileDiff::parse(&output.stdout))
+    Ok(output.stdout)
 }

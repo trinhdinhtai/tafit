@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use tafit_base::APP_NAME;
+use tafit_base::EXE_NAME;
 use tafit_git_gix::GixBackend;
 use tafit_state::{AppStore, Msg, StoreEvents, WindowId};
 
@@ -29,7 +29,7 @@ pub fn run() -> ExitCode {
 /// `tafit [<path>]`: the Repository to open, made absolute; the current
 /// directory when omitted.
 fn repository_arg(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<PathBuf, String> {
-    let usage = format!("usage: {APP_NAME} [<path>]");
+    let usage = format!("usage: {EXE_NAME} [<path>]");
     let path = match (args.next(), args.next()) {
         (None, _) => PathBuf::from("."),
         (Some(arg), None) if arg != "-h" && arg != "--help" => PathBuf::from(arg),
@@ -46,6 +46,7 @@ fn run_ui(store: AppStore, events: StoreEvents) -> ExitCode {
 
 #[cfg(not(feature = "ui-rune"))]
 fn run_ui(_store: AppStore, _events: StoreEvents) -> ExitCode {
-    eprintln!("{APP_NAME} was built without a UI (feature `ui-rune`)");
+    let app = tafit_base::APP_NAME;
+    eprintln!("{app} was built without a UI (feature `ui-rune`)");
     ExitCode::FAILURE
 }

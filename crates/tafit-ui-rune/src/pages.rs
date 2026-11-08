@@ -243,7 +243,7 @@ pub(crate) fn outdated_git(s: &Ui, k: &Kit) -> Option<El> {
         return None;
     }
     let message = format!(
-        "Git {} is older than {}. tafit still works, but some features may not.",
+        "Git {} is older than {}. Tafit still works, but some features may not.",
         git.version.text,
         GitVersion::minimum_text()
     );
@@ -269,7 +269,7 @@ pub(crate) fn git_unavailable(error: &GitError, k: &Kit) -> El {
             "git-missing-notice",
             "Git is required",
             format!(
-                "tafit runs your system's git for commits, pushes and other changes. Install Git {minimum} or newer and make sure `git` is on your PATH, then restart tafit."
+                "Tafit runs your system's git for commits, pushes and other changes. Install Git {minimum} or newer and make sure `git` is on your PATH, then restart Tafit."
             ),
         )
     } else {
@@ -277,7 +277,7 @@ pub(crate) fn git_unavailable(error: &GitError, k: &Kit) -> El {
             "git-error-notice",
             "Git could not be run",
             format!(
-                "Check that `git --version` works in a terminal; if it doesn't, reinstall Git {minimum} or newer. Then restart tafit."
+                "Check that `git --version` works in a terminal; if it doesn't, reinstall Git {minimum} or newer. Then restart Tafit."
             ),
         )
     };

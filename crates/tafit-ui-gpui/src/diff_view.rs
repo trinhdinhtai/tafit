@@ -9,9 +9,15 @@ use gpui::{
     AnyElement, ColorExt, Context, Div, HighlightStyle, Hsla, IntoElement, ListAlignment,
     ListState, Stateful, StyledText, div, list, prelude::*, px,
 };
-use tafit_core::{ColumnLine, ColumnRow, DiffLine, FileDiff, Hunk, LineKind, WhitespaceMode};
-use tafit_state::{DiffLayout, DiffOptions, FileRef, Loadable, Msg, RepoId, RepoState};
-use tafit_ui_kit::{Theme, fonts, toggle_button};
+use tafit_core::{
+    ColumnLine, ColumnRow, DiffLine, FileDiff, Hunk, LineAction, LineKind, LineRef, LineSelection,
+    LineSide, WhitespaceMode,
+};
+use tafit_state::{
+    AppStore, ChangeGroup, DiffLayout, DiffOptions, FileRef, Loadable, Msg, RepoId, RepoState,
+    SelectMode,
+};
+use tafit_ui_kit::{Theme, backdrop, button, dialog, fonts, toggle_button};
 
 use crate::{TafitView, centered_message};
 
@@ -96,13 +102,102 @@ impl DiffLists {
     }
 }
 
+/// What a diff's rows need to select lines and apply hunks: the shown
+/// file's Repository and group, its Line Selection, and the store.
+#[derive(Clone)]
+struct Selecting {
+    repo_id: RepoId,
+    group: ChangeGroup,
+    lines: Arc<LineSelection>,
+    store: Arc<AppStore>,
+}
+
+impl Selecting {
+    /// `row` as a changed line: highlighted when selected, and a click adds
+    /// it to the Line Selection or takes it out.
+    fn line(&self, row: Div, line: LineRef, theme: &Theme) -> AnyElement {
+        let (repo_id, store) = (self.repo_id, Arc::clone(&self.store));
+        let id = match line.side {
+            LineSide::Old => ("diff-old-line", line.number as usize),
+            LineSide::New => ("diff-new-line", line.number as usize),
+        };
+        row.when(self.lines.contains(&line), |row| {
+            row.bg(theme.accent.opacity(0.35))
+        })
+        .debug_selector(move || format!("{}-{}", id.0, id.1))
+        .id(id)
+        .cursor_pointer()
+        .on_click(move |_, _, _| {
+            store.dispatch(Msg::SelectLine {
+                repo_id,
+                line,
+                mode: SelectMode::Toggle,
+            });
+        })
+        .into_any_element()
+    }
+
+    /// The buttons of the actions that apply to this group's diffs.
+    fn actions(&self) -> impl Iterator<Item = &'static ActionButton> + use<> {
+        let group = self.group;
+        ACTION_BUTTONS
+            .iter()
+            .filter(move |button| group.allows(button.action))
+    }
+}
+
+/// How a `LineAction` is offered: its verb, and the debug selectors of its
+/// buttons for the Line Selection and for a hunk.
+struct ActionButton {
+    action: LineAction,
+    verb: &'static str,
+    lines_selector: &'static str,
+    hunk_selector: &'static str,
+}
+
+const ACTION_BUTTONS: [ActionButton; 3] = [
+    ActionButton {
+        action: LineAction::Stage,
+        verb: "Stage",
+        lines_selector: "diff-stage-lines",
+        hunk_selector: "diff-stage-hunk",
+    },
+    ActionButton {
+        action: LineAction::Unstage,
+        verb: "Unstage",
+        lines_selector: "diff-unstage-lines",
+        hunk_selector: "diff-unstage-hunk",
+    },
+    ActionButton {
+        action: LineAction::Discard,
+        verb: "Discard",
+        lines_selector: "diff-discard-lines",
+        hunk_selector: "diff-discard-hunk",
+    },
+];
+
+/// `count` lines, e.g. `1 line` or `3 lines`.
+fn lines_label(count: usize) -> String {
+    match count {
+        1 => "1 line".to_owned(),
+        _ => format!("{count} lines"),
+    }
+}
+
 pub(crate) fn diff_view(
     repo: &RepoState,
     options: DiffOptions,
     lists: &mut DiffLists,
+    store: &Arc<AppStore>,
     theme: &Theme,
     cx: &mut Context<TafitView>,
 ) -> impl IntoElement {
+    let selecting = repo.diff.as_ref().map(|diff| Selecting {
+        repo_id: repo.id,
+        group: diff.file.group,
+        lines: Arc::new(diff.lines.clone()),
+        store: Arc::clone(store),
+    });
     let body = match &repo.diff {
         None => {
             let hint = if repo.selection.len() > 1 {
@@ -137,12 +232,14 @@ pub(crate) fn diff_view(
                 FileDiff::Text(hunks) => {
                     let rows = hunks.iter().map(|hunk| hunk.lines.len() + 1).sum();
                     let (list, _) = lists.prepare(repo.id, &diff.file, loaded, rows, options);
-                    inline_lines(Arc::clone(loaded), list, options, *theme)
+                    let selecting = selecting.clone().expect("a diff is shown");
+                    inline_lines(Arc::clone(loaded), list, options, *theme, selecting)
                 }
                 FileDiff::TwoColumn(rows) => {
                     let (old, new) =
                         lists.prepare(repo.id, &diff.file, loaded, rows.len(), options);
-                    two_columns(Arc::clone(loaded), old, new, options, *theme)
+                    let selecting = selecting.clone().expect("a diff is shown");
+                    two_columns(Arc::clone(loaded), old, new, options, *theme, selecting)
                 }
             },
         },
@@ -157,7 +254,7 @@ pub(crate) fn diff_view(
         .border_l_1()
         .border_t_1()
         .border_color(theme.border)
-        .child(toolbar(options, theme, cx))
+        .child(toolbar(options, selecting.as_ref(), theme, cx))
         .child(
             div()
                 .flex_1()
@@ -174,7 +271,36 @@ fn no_changes(theme: &Theme) -> AnyElement {
 
 /// The display options. A click changes the latest options the store has
 /// published, so clicks quicker than the snapshots that show them all count.
-fn toolbar(options: DiffOptions, theme: &Theme, cx: &mut Context<TafitView>) -> impl IntoElement {
+fn toolbar(
+    options: DiffOptions,
+    selecting: Option<&Selecting>,
+    theme: &Theme,
+    cx: &mut Context<TafitView>,
+) -> impl IntoElement {
+    // What can be done with the Line Selection, once there is one.
+    let line_actions = selecting
+        .filter(|selecting| !selecting.lines.is_empty())
+        .map(|selecting| {
+            let count = selecting.lines.len();
+            div()
+                .flex()
+                .flex_none()
+                .gap(px(6.))
+                .ml_auto()
+                .children(selecting.actions().map(|button_of| {
+                    let (repo_id, store) = (selecting.repo_id, Arc::clone(&selecting.store));
+                    let (action, selector) = (button_of.action, button_of.lines_selector);
+                    button(format!("{} {}", button_of.verb, lines_label(count)), theme)
+                        .text_xs()
+                        .py(px(2.))
+                        .px(px(8.))
+                        .id(selector)
+                        .debug_selector(move || selector.to_owned())
+                        .on_click(move |_, _, _| {
+                            store.dispatch(Msg::ApplyLines { repo_id, action });
+                        })
+                }))
+        });
     let two_columns = options.layout == DiffLayout::TwoColumn;
     let ignore_whitespace = options.whitespace == WhitespaceMode::Ignore;
     // Only two columns have anything to scroll together.
@@ -258,6 +384,7 @@ fn toolbar(options: DiffOptions, theme: &Theme, cx: &mut Context<TafitView>) -> 
             },
         ))
         .children(sync_scroll)
+        .children(line_actions)
 }
 
 fn option_button(
@@ -283,6 +410,7 @@ fn inline_lines(
     state: ListState,
     options: DiffOptions,
     theme: Theme,
+    selecting: Selecting,
 ) -> AnyElement {
     let FileDiff::Text(hunks) = &*diff else {
         unreachable!("only inline diffs have hunks")
@@ -301,36 +429,67 @@ fn inline_lines(
         // The last hunk starting at or before `ix`.
         let hunk = starts.partition_point(|&start| start <= ix) - 1;
         match ix - starts[hunk] {
-            0 => hunk_header(&hunks[hunk], &theme),
-            line => diff_line(&hunks[hunk].lines[line - 1], options, &theme),
+            0 => hunk_header(&hunks[hunk], hunk, &selecting, &theme),
+            line => diff_line(&hunks[hunk].lines[line - 1], options, &theme, &selecting),
         }
     })
     .size_full()
     .into_any_element()
 }
 
-fn hunk_header(hunk: &Hunk, theme: &Theme) -> AnyElement {
+/// A hunk's header line, with buttons that apply an action to all of it.
+fn hunk_header(hunk: &Hunk, ix: usize, selecting: &Selecting, theme: &Theme) -> AnyElement {
+    let buttons = selecting.actions().map(|button_of| {
+        let (repo_id, store) = (selecting.repo_id, Arc::clone(&selecting.store));
+        let (action, selector) = (button_of.action, button_of.hunk_selector);
+        button(format!("{} hunk", button_of.verb), theme)
+            .text_xs()
+            .py(px(0.))
+            .px(px(6.))
+            .id((selector, ix))
+            .debug_selector(move || selector.to_owned())
+            .on_click(move |_, _, _| {
+                store.dispatch(Msg::ApplyHunk {
+                    repo_id,
+                    hunk: ix,
+                    action,
+                });
+            })
+    });
     div()
         .debug_selector(|| "diff-hunk-header".to_owned())
         .h(px(ROW_HEIGHT))
         .flex()
         .items_center()
+        .gap(px(6.))
         .px(px(8.))
         .bg(theme.surface)
         .text_color(theme.text_muted)
         .whitespace_nowrap()
         .overflow_hidden()
-        .child(hunk.header.clone())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(hunk.header.clone()),
+        )
+        .children(buttons)
         .into_any_element()
 }
 
-fn diff_line(line: &DiffLine, options: DiffOptions, theme: &Theme) -> AnyElement {
+fn diff_line(
+    line: &DiffLine,
+    options: DiffOptions,
+    theme: &Theme,
+    selecting: &Selecting,
+) -> AnyElement {
     let (marker, colors) = match line.kind {
         LineKind::Context => (" ", None),
         LineKind::Added => ("+", Some(ChangeColors::added(theme))),
         LineKind::Removed => ("-", Some(ChangeColors::removed(theme))),
     };
-    row_box(options)
+    let row = row_box(options)
         .debug_selector(|| "diff-line".to_owned())
         .when_some(colors, |row, colors| row.bg(colors.line))
         .child(line_number(line.old_line, theme))
@@ -342,8 +501,11 @@ fn diff_line(line: &DiffLine, options: DiffOptions, theme: &Theme) -> AnyElement
             colors.map(|colors| colors.highlight),
             options,
         ))
-        .children(no_newline(line.no_newline_at_end, theme))
-        .into_any_element()
+        .children(no_newline(line.no_newline_at_end, theme));
+    match line.line_ref() {
+        Some(line) => selecting.line(row, line, theme),
+        None => row.into_any_element(),
+    }
 }
 
 fn two_columns(
@@ -352,6 +514,7 @@ fn two_columns(
     new: ListState,
     options: DiffOptions,
     theme: Theme,
+    selecting: Selecting,
 ) -> AnyElement {
     if options.sync_scroll {
         // One list of whole rows: both sides of a row always share a height.
@@ -360,16 +523,29 @@ fn two_columns(
             div()
                 .debug_selector(|| "diff-column-row".to_owned())
                 .flex()
-                .child(column_side(row.old.as_ref(), Side::Old, options, &theme))
+                .child(column_side(
+                    row.old.as_ref(),
+                    LineSide::Old,
+                    options,
+                    &theme,
+                    &selecting,
+                ))
                 .child(div().w(px(1.)).flex_none().bg(theme.border))
-                .child(column_side(row.new.as_ref(), Side::New, options, &theme))
+                .child(column_side(
+                    row.new.as_ref(),
+                    LineSide::New,
+                    options,
+                    &theme,
+                    &selecting,
+                ))
                 .into_any_element()
         })
         .size_full()
         .into_any_element();
     }
-    let column = |selector: &'static str, state: ListState, side: Side| {
+    let column = |selector: &'static str, state: ListState, side: LineSide| {
         let diff = Arc::clone(&diff);
+        let selecting = selecting.clone();
         div()
             .debug_selector(move || selector.to_owned())
             .flex_1()
@@ -379,13 +555,13 @@ fn two_columns(
                 list(state, move |ix, _window, _cx| {
                     let row = &rows(&diff)[ix];
                     let line = match side {
-                        Side::Old => row.old.as_ref(),
-                        Side::New => row.new.as_ref(),
+                        LineSide::Old => row.old.as_ref(),
+                        LineSide::New => row.new.as_ref(),
                     };
                     div()
                         .debug_selector(|| "diff-column-row".to_owned())
                         .flex()
-                        .child(column_side(line, side, options, &theme))
+                        .child(column_side(line, side, options, &theme, &selecting))
                         .into_any_element()
                 })
                 .size_full(),
@@ -394,9 +570,9 @@ fn two_columns(
     div()
         .size_full()
         .flex()
-        .child(column("diff-old-column", old, Side::Old))
+        .child(column("diff-old-column", old, LineSide::Old))
         .child(div().w(px(1.)).flex_none().bg(theme.border))
-        .child(column("diff-new-column", new, Side::New))
+        .child(column("diff-new-column", new, LineSide::New))
         .into_any_element()
 }
 
@@ -407,26 +583,27 @@ fn rows(diff: &FileDiff) -> &[ColumnRow] {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Side {
-    Old,
-    New,
-}
-
 /// One side of a two-column row; `None` is a gap where the other side's
 /// line has no counterpart.
-fn column_side(line: Option<&ColumnLine>, side: Side, options: DiffOptions, theme: &Theme) -> Div {
+fn column_side(
+    line: Option<&ColumnLine>,
+    side: LineSide,
+    options: DiffOptions,
+    theme: &Theme,
+    selecting: &Selecting,
+) -> AnyElement {
     let Some(line) = line else {
         return row_box(options)
             .flex_1()
             .min_w_0()
-            .bg(theme.surface.opacity(0.6));
+            .bg(theme.surface.opacity(0.6))
+            .into_any_element();
     };
     let colors = line.changed.then(|| match side {
-        Side::Old => ChangeColors::removed(theme),
-        Side::New => ChangeColors::added(theme),
+        LineSide::Old => ChangeColors::removed(theme),
+        LineSide::New => ChangeColors::added(theme),
     });
-    row_box(options)
+    let row = row_box(options)
         .flex_1()
         .min_w_0()
         .when_some(colors, |row, colors| row.bg(colors.line))
@@ -437,7 +614,64 @@ fn column_side(line: Option<&ColumnLine>, side: Side, options: DiffOptions, them
             colors.map(|colors| colors.highlight),
             options,
         ))
-        .children(no_newline(line.no_newline_at_end, theme))
+        .children(no_newline(line.no_newline_at_end, theme));
+    match line.line_ref(side) {
+        Some(line) => selecting.line(row, line, theme),
+        None => row.into_any_element(),
+    }
+}
+
+/// Asks to confirm the Discard waiting in `repo`, which git can't undo;
+/// `None` when none waits.
+pub(crate) fn discard_dialog(
+    repo: &RepoState,
+    store: &Arc<AppStore>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let pending = repo.confirm_discard.as_ref()?;
+    let count = pending.lines.len();
+    let (repo_id, confirm, cancel) = (repo.id, Arc::clone(store), Arc::clone(store));
+    Some(
+        backdrop()
+            .debug_selector(|| "discard-dialog".to_owned())
+            .child(
+                dialog(theme)
+                    .child(
+                        div()
+                            .text_lg()
+                            .child(format!("Discard {}?", lines_label(count))),
+                    )
+                    .child(div().text_color(theme.text_muted).child(format!(
+                        "The changes to {} are removed from the work tree. This can't be undone.",
+                        pending.file.path
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                button("Cancel", theme)
+                                    .id("discard-cancel")
+                                    .debug_selector(|| "discard-cancel".to_owned())
+                                    .on_click(move |_, _, _| {
+                                        cancel.dispatch(Msg::CancelDiscard(repo_id));
+                                    }),
+                            )
+                            .child(
+                                button("Discard", theme)
+                                    .border_color(theme.error)
+                                    .text_color(theme.error)
+                                    .id("discard-confirm")
+                                    .debug_selector(|| "discard-confirm".to_owned())
+                                    .on_click(move |_, _, _| {
+                                        confirm.dispatch(Msg::ConfirmDiscard(repo_id));
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+    )
 }
 
 /// A changed line's background, and the stronger one of its changed words.

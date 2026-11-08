@@ -229,7 +229,10 @@ impl Render for TafitView {
             )
             .into_any_element(),
         };
+        let discard_dialog =
+            active.and_then(|repo| diff_view::discard_dialog(repo, &self.store, theme));
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -240,6 +243,7 @@ impl Render for TafitView {
             .child(tab_bar(theme).child(tabs).child(buttons))
             .children(outdated_git)
             .child(body)
+            .children(discard_dialog)
     }
 }
 
@@ -494,6 +498,7 @@ fn repository_tab_body(
                         repo,
                         diff_options,
                         diff_lists,
+                        store,
                         theme,
                         cx,
                     )),

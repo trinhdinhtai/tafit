@@ -3,6 +3,7 @@
 //! Never depends on GPUI.
 
 mod store;
+mod watch;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use tafit_core::{
 };
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
+pub use watch::WatchOptions;
 
 /// Identifies one opened Repository for the lifetime of the store; never reused,
 /// so a result for a closed Repository can't land on a newer one.

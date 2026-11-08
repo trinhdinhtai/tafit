@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext};
 use tafit_core::{
-    ChangeKind, FileChange, FileDiff, GitEnvironment, GitError, GitVersion, Head, RepositoryInfo,
-    RepositoryStatus, WhitespaceMode,
+    ChangeKind, FileChange, FileDiff, GitEnvironment, GitError, GitVersion, Head, LineAction,
+    LineRef, LineSide, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 use tafit_git_gix::GixBackend;
 use tafit_state::{
@@ -589,5 +589,69 @@ fn the_diff_toolbar_changes_how_diffs_are_shown(cx: &mut TestAppContext) {
             tab_size: 8,
             sync_scroll: false,
         }
+    );
+}
+
+#[gpui::test]
+fn a_hunk_offers_to_stage_and_discard_it_and_a_click_selects_a_line(cx: &mut TestAppContext) {
+    let diff = FileDiff::parse(b"@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n");
+    let (store, cx) = render_with_store(with_diff(diff), cx);
+
+    assert!(cx.debug_bounds("diff-stage-hunk").is_some(), "stage hunk");
+    assert!(
+        cx.debug_bounds("diff-discard-hunk").is_some(),
+        "discard hunk"
+    );
+    assert!(
+        cx.debug_bounds("diff-unstage-hunk").is_none(),
+        "nothing staged"
+    );
+    let removed = cx
+        .debug_bounds("diff-old-line-2")
+        .expect("the removed `two` is drawn");
+    cx.simulate_click(removed.center(), Modifiers::none());
+    store.flush();
+
+    let state = store.snapshot();
+    let lines = &state
+        .active()
+        .and_then(|repo| repo.diff.as_ref())
+        .expect("shown")
+        .lines;
+    assert_eq!(
+        lines.iter().copied().collect::<Vec<_>>(),
+        [LineRef {
+            side: LineSide::Old,
+            number: 2
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_discard_waits_in_a_dialog(cx: &mut TestAppContext) {
+    let diff = FileDiff::parse(b"@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n");
+    let mut state = with_diff(diff);
+    let repo_id = state.active_repo().expect("a Repository is open");
+    reduce(
+        &mut state,
+        Msg::ApplyHunk {
+            repo_id,
+            hunk: 0,
+            action: LineAction::Discard,
+        },
+    );
+    let (store, cx) = render_with_store(state, cx);
+    assert!(cx.debug_bounds("discard-dialog").is_some(), "the dialog");
+
+    let cancel = cx.debug_bounds("discard-cancel").expect("a cancel button");
+    cx.simulate_click(cancel.center(), Modifiers::none());
+    store.flush();
+
+    assert!(
+        store
+            .snapshot()
+            .active()
+            .is_some_and(|repo| repo.confirm_discard.is_none()),
+        "cancelled"
     );
 }

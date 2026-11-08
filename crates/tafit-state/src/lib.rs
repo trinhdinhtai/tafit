@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
-    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, RepositoryInfo,
-    RepositoryStatus, WhitespaceMode,
+    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, LineAction,
+    LinePatchError, LineRef, LineSelection, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 
 pub use store::{AppStore, StoreEvent, StoreEvents};
@@ -94,6 +94,49 @@ pub struct DiffState {
     pub file: FileRef,
     /// While a newer read of the same file runs, the previous result stays.
     pub diff: Loadable<Arc<FileDiff>>,
+    /// The changed lines selected in the `Ready` diff. A result that differs
+    /// from it clears them.
+    pub lines: LineSelection,
+    /// What git is given for the file: it, or a rename's old path then new.
+    paths: Vec<String>,
+    /// The layout and whitespace mode the `Ready` diff was read with.
+    read_with: (DiffLayout, WhitespaceMode),
+    /// A newer read of the file runs; `diff` still holds the previous one.
+    pub refreshing: bool,
+}
+
+/// Changed lines of one file to stage, unstage or Discard, with the diff
+/// they were selected in. Applying them is refused as stale once that diff
+/// is no longer the file's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    pub file: FileRef,
+    pub lines: LineSelection,
+    paths: Vec<String>,
+    seen: Arc<FileDiff>,
+    layout: DiffLayout,
+    whitespace: WhitespaceMode,
+}
+
+impl ChangeGroup {
+    /// Whether `action` applies to a diff of this group: staging to unstaged
+    /// and untracked files, unstaging to staged ones, Discard to unstaged.
+    pub fn allows(self, action: LineAction) -> bool {
+        matches!(
+            (self, action),
+            (Self::Unstaged | Self::Untracked, LineAction::Stage)
+                | (Self::Staged, LineAction::Unstage)
+                | (Self::Unstaged, LineAction::Discard)
+        )
+    }
+
+    fn diff_source(self) -> DiffSource {
+        match self {
+            Self::Staged => DiffSource::Staged,
+            Self::Unstaged => DiffSource::Unstaged,
+            Self::Untracked => DiffSource::Untracked,
+        }
+    }
 }
 
 /// One of the change list's three groups.
@@ -172,6 +215,11 @@ pub struct RepoState {
     pub diff: Option<DiffState>,
     /// The latest diff read; only its result is kept.
     diff_request: DiffRequestId,
+    /// The layout and whitespace mode of the latest diff read.
+    diff_requested_with: (DiffLayout, WhitespaceMode),
+    /// Lines waiting for the user to confirm their Discard, which git can't
+    /// undo (`Msg::ConfirmDiscard`, `Msg::CancelDiscard`).
+    pub confirm_discard: Option<LineChange>,
 }
 
 impl RepoState {
@@ -192,6 +240,8 @@ impl RepoState {
             commits_made: 0,
             diff: None,
             diff_request: DiffRequestId::default(),
+            diff_requested_with: Default::default(),
+            confirm_discard: None,
         }
     }
 
@@ -229,21 +279,73 @@ impl RepoState {
             self.diff = Some(DiffState {
                 file: file.clone(),
                 diff: Loadable::Loading,
+                lines: LineSelection::new(),
+                paths: paths.clone(),
+                read_with: (options.layout, options.whitespace),
+                refreshing: false,
             });
         }
+        if let Some(diff) = &mut self.diff {
+            diff.refreshing = true;
+        }
         self.diff_request = DiffRequestId(self.diff_request.0 + 1);
+        self.diff_requested_with = (options.layout, options.whitespace);
         Some(Effect::LoadDiff {
             repo_id: self.id,
             request: self.diff_request,
             path: self.path.clone(),
-            source: match file.group {
-                ChangeGroup::Staged => DiffSource::Staged,
-                ChangeGroup::Unstaged => DiffSource::Unstaged,
-                ChangeGroup::Untracked => DiffSource::Untracked,
-            },
+            source: file.group.diff_source(),
             paths,
             layout: options.layout,
             whitespace: options.whitespace,
+        })
+    }
+
+    /// `lines` of the shown diff, once it has loaded.
+    fn line_change(&self, lines: LineSelection) -> Option<LineChange> {
+        let diff = self.diff.as_ref()?;
+        let Loadable::Ready(seen) = &diff.diff else {
+            return None;
+        };
+        let (layout, whitespace) = diff.read_with;
+        Some(LineChange {
+            file: diff.file.clone(),
+            lines,
+            paths: diff.paths.clone(),
+            seen: Arc::clone(seen),
+            layout,
+            whitespace,
+        })
+    }
+
+    /// Asks to apply `action` to `lines` of the shown diff: a Discard waits
+    /// for confirming, the others start at once. Nothing happens when the
+    /// diff hasn't loaded or `action` doesn't apply to its group; an empty
+    /// selection is refused in `write_error`.
+    fn apply_lines(&mut self, lines: LineSelection, action: LineAction) -> Option<Effect> {
+        let change = self
+            .line_change(lines)
+            .filter(|change| change.file.group.allows(action))?;
+        if self.writing {
+            return None;
+        }
+        if change.lines.is_empty() {
+            self.write_error = Some(LinePatchError::Empty.to_string());
+            return None;
+        }
+        if action == LineAction::Discard {
+            self.confirm_discard = Some(change);
+            return None;
+        }
+        self.start_lines(change, action)
+    }
+
+    fn start_lines(&mut self, change: LineChange, action: LineAction) -> Option<Effect> {
+        self.start_write().then(|| Effect::ApplyLines {
+            repo_id: self.id,
+            path: self.path.clone(),
+            change,
+            action,
         })
     }
 
@@ -541,7 +643,31 @@ pub enum Msg {
     StageSelected(RepoId),
     /// Unstage the selected staged files.
     UnstageSelected(RepoId),
-    /// Result of `Effect::Stage` or `Effect::Unstage`.
+    /// Change which changed lines of the shown diff are selected; a line
+    /// that isn't one of its changes is ignored.
+    SelectLine {
+        repo_id: RepoId,
+        line: LineRef,
+        mode: SelectMode,
+    },
+    /// Apply `action` to the Line Selection of the shown diff. A Discard
+    /// waits in `RepoState::confirm_discard` until confirmed.
+    ApplyLines {
+        repo_id: RepoId,
+        action: LineAction,
+    },
+    /// Apply `action` to every changed line of hunk `hunk` (an index into
+    /// the shown inline diff's hunks), as `ApplyLines` does.
+    ApplyHunk {
+        repo_id: RepoId,
+        hunk: usize,
+        action: LineAction,
+    },
+    /// Go ahead with the Discard in `RepoState::confirm_discard`.
+    ConfirmDiscard(RepoId),
+    /// Drop the Discard in `RepoState::confirm_discard`.
+    CancelDiscard(RepoId),
+    /// Result of `Effect::Stage`, `Effect::Unstage` or `Effect::ApplyLines`.
     IndexUpdated {
         repo_id: RepoId,
         result: Result<(), GitError>,
@@ -608,6 +734,14 @@ pub enum Effect {
         repo_id: RepoId,
         path: PathBuf,
         paths: Vec<String>,
+    },
+    /// Apply `action` to the changed lines, unless the file's diff is no
+    /// longer the one they were selected in.
+    ApplyLines {
+        repo_id: RepoId,
+        path: PathBuf,
+        change: LineChange,
+        action: LineAction,
     },
     /// Commit what is staged with this message.
     Commit {
@@ -801,10 +935,96 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                 && request == repo.diff_request
                 && let Some(diff) = &mut repo.diff
             {
-                diff.diff = match result {
-                    Ok(loaded) => Loadable::Ready(Arc::new(loaded)),
-                    Err(err) => Loadable::Error(err.to_string()),
-                };
+                let unchanged = matches!(
+                    (&diff.diff, &result),
+                    (Loadable::Ready(shown), Ok(loaded)) if **shown == *loaded
+                );
+                if !unchanged {
+                    diff.lines.clear();
+                    diff.diff = match result {
+                        Ok(loaded) => Loadable::Ready(Arc::new(loaded)),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    };
+                }
+                diff.read_with = repo.diff_requested_with;
+                diff.refreshing = false;
+            }
+            Vec::new()
+        }
+        Msg::SelectLine {
+            repo_id,
+            line,
+            mode,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && let Some(diff) = &mut repo.diff
+                && let Loadable::Ready(shown) = &diff.diff
+                && shown.has_change(line)
+            {
+                match mode {
+                    SelectMode::Only => {
+                        diff.lines.clear();
+                        diff.lines.insert(line);
+                    }
+                    SelectMode::Toggle => {
+                        if !diff.lines.remove(&line) {
+                            diff.lines.insert(line);
+                        }
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Msg::ApplyLines { repo_id, action } => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let lines = repo
+                .diff
+                .as_ref()
+                .map(|diff| diff.lines.clone())
+                .unwrap_or_default();
+            repo.apply_lines(lines, action).into_iter().collect()
+        }
+        Msg::ApplyHunk {
+            repo_id,
+            hunk,
+            action,
+        } => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            let lines = match repo.diff.as_ref().map(|diff| &diff.diff) {
+                Some(Loadable::Ready(shown)) => match &**shown {
+                    FileDiff::Text(hunks) => hunks.get(hunk).map(|hunk| hunk.changed_lines()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match lines {
+                Some(lines) => repo.apply_lines(lines, action).into_iter().collect(),
+                None => Vec::new(),
+            }
+        }
+        Msg::ConfirmDiscard(repo_id) => {
+            let Some(repo) = state.repo_mut(repo_id) else {
+                return Vec::new();
+            };
+            // Kept while another write runs, so the user can confirm again.
+            if repo.writing {
+                return Vec::new();
+            }
+            match repo.confirm_discard.take() {
+                Some(change) => repo
+                    .start_lines(change, LineAction::Discard)
+                    .into_iter()
+                    .collect(),
+                None => Vec::new(),
+            }
+        }
+        Msg::CancelDiscard(repo_id) => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                repo.confirm_discard = None;
             }
             Vec::new()
         }

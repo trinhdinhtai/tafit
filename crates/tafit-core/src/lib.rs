@@ -2,6 +2,9 @@
 
 mod align;
 mod highlight;
+mod patch;
+
+pub use patch::{LineAction, LinePatchError, LineRef, LineSelection, LineSide, line_patch};
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -287,9 +290,8 @@ impl FileDiff {
                     kind,
                     old_line,
                     new_line,
-                    // shortcut: a line that isn't UTF-8 is shown lossily, and
-                    // a CRLF line loses its `\r`; staging lines (#11) will
-                    // need the exact bytes.
+                    // A line that isn't UTF-8 is shown lossily, and a CRLF
+                    // line loses its `\r`; `line_patch` reads the exact bytes.
                     text: String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text))
                         .into_owned(),
                     highlights: Vec::new(),
@@ -404,6 +406,59 @@ pub struct DiffLine {
     pub no_newline_at_end: bool,
 }
 
+impl DiffLine {
+    /// The line as a Line Selection names it; `None` for context.
+    pub fn line_ref(&self) -> Option<LineRef> {
+        let (side, number) = match self.kind {
+            LineKind::Context => return None,
+            LineKind::Removed => (LineSide::Old, self.old_line?),
+            LineKind::Added => (LineSide::New, self.new_line?),
+        };
+        Some(LineRef { side, number })
+    }
+}
+
+impl Hunk {
+    /// Every changed line of the hunk.
+    pub fn changed_lines(&self) -> LineSelection {
+        self.lines.iter().filter_map(DiffLine::line_ref).collect()
+    }
+}
+
+impl ColumnLine {
+    /// The line as a Line Selection names it, on `side` of its row;
+    /// `None` when unchanged.
+    pub fn line_ref(&self, side: LineSide) -> Option<LineRef> {
+        self.changed.then_some(LineRef {
+            side,
+            number: self.number,
+        })
+    }
+}
+
+impl FileDiff {
+    /// Whether `line` is a changed line of this diff, one a Line Selection
+    /// can hold.
+    pub fn has_change(&self, line: LineRef) -> bool {
+        match self {
+            Self::Text(hunks) => hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|diff_line| diff_line.line_ref() == Some(line)),
+            Self::TwoColumn(rows) => rows.iter().any(|row| {
+                let column = match line.side {
+                    LineSide::Old => &row.old,
+                    LineSide::New => &row.new,
+                };
+                column
+                    .as_ref()
+                    .is_some_and(|column| column.line_ref(line.side) == Some(line))
+            }),
+            Self::Binary => false,
+        }
+    }
+}
+
 /// A git version, as printed by `git --version`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitVersion {
@@ -486,6 +541,9 @@ pub enum GitError {
         stdout: String,
         stderr: String,
     },
+    /// A Line Selection couldn't be turned into a patch.
+    #[error(transparent)]
+    LineSelection(#[from] LinePatchError),
     #[error("{0}")]
     Backend(String),
 }
@@ -572,6 +630,25 @@ pub trait GitRepository: Send + Sync {
         whitespace: WhitespaceMode,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError>;
+
+    /// One file's `git diff` from `source` as git printed it, hunks with
+    /// context and every whitespace change: what `line_patch` builds a
+    /// patch from. Same fixed config and `paths` as `diff`.
+    fn diff_patch(
+        &self,
+        source: DiffSource,
+        paths: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, GitError>;
+
+    /// Applies a `line_patch` for `action`: to the index for `Stage` and
+    /// `Unstage`, to the work tree for `Discard`, reversed unless staging.
+    fn apply_patch(
+        &self,
+        patch: &[u8],
+        action: LineAction,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitError>;
 
     /// Stages each repo-relative path (a file, or an untracked folder ending
     /// in `/`) as it is in the work tree, a deletion included.

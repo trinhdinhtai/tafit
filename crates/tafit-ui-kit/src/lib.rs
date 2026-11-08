@@ -96,6 +96,36 @@ pub fn disabled_button(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .child(label.into())
 }
 
+/// A layer over the whole of its (`relative`) parent that dims what is
+/// behind it and takes its clicks, holding a `dialog` in the middle.
+pub fn backdrop() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::black().opacity(0.5))
+        .occlude()
+}
+
+/// A box that asks the user something, e.g. to confirm an action that
+/// can't be undone; sits on a `backdrop`. The caller adds its text and
+/// buttons.
+pub fn dialog(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .p(px(20.))
+        .max_w(px(440.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .text_color(theme.text)
+}
+
 /// A small "×" that closes what it sits on, e.g. a `tab`. The caller gives
 /// it an id and a click handler.
 pub fn close_button(theme: &Theme) -> Div {

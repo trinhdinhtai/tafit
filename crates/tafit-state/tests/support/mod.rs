@@ -41,7 +41,8 @@ pub struct TestRepo {
 impl TestRepo {
     /// `git init` with `main` as the initial branch and no commits. The
     /// store's git reads the user's config, so the repo's own config sets an
-    /// identity, turns signing off and keeps hooks in `.git/hooks`.
+    /// identity, turns signing off, keeps hooks in `.git/hooks` and line
+    /// endings as written (git for Windows turns `core.autocrlf` on).
     pub fn init(name: &str) -> Self {
         let repo = Self {
             dir: TestDir::new(name),
@@ -52,6 +53,7 @@ impl TestRepo {
             ("user.email", "test@tafit.invalid"),
             ("commit.gpgsign", "false"),
             ("core.hooksPath", ".git/hooks"),
+            ("core.autocrlf", "false"),
         ] {
             repo.git(&["config", key, value]);
         }
@@ -96,6 +98,25 @@ impl TestRepo {
         std::fs::create_dir_all(path.parent().expect("a file path has a parent"))
             .expect("create parent folders");
         std::fs::write(path, contents).expect("write test file");
+    }
+
+    /// Writes `contents` to the repo-relative `path` byte for byte, e.g.
+    /// with CRLF line endings.
+    pub fn write_bytes(&self, path: &str, contents: &[u8]) {
+        std::fs::write(self.path().join(path), contents).expect("write test file");
+    }
+
+    /// The work tree's `path`, byte for byte.
+    pub fn work_file(&self, path: &str) -> Vec<u8> {
+        std::fs::read(self.path().join(path)).expect("read test file")
+    }
+
+    /// The index's `path`, byte for byte.
+    pub fn index_file(&self, path: &str) -> Vec<u8> {
+        let spec = format!(":{path}");
+        let output = self.run_git(&["cat-file", "blob", &spec]);
+        assert!(output.status.success(), "{path} is not in the index");
+        output.stdout
     }
 
     /// Deletes the repo-relative file `path` from the work tree only.

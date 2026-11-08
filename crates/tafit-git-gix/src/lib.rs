@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tafit_core::{
     CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError,
-    GitRepository, Head, RepositoryInfo, RepositoryStatus, WhitespaceMode,
+    GitRepository, Head, LineAction, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 
 use crate::cli::GitCli;
@@ -169,6 +169,37 @@ impl GitRepository for GixRepository {
             whitespace,
             cancel,
         )
+    }
+
+    fn diff_patch(
+        &self,
+        source: DiffSource,
+        paths: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, GitError> {
+        let workdir = self.workdir.as_deref().ok_or_else(|| {
+            GitError::Backend("a bare Repository has no work tree to diff".to_owned())
+        })?;
+        diff::diff_patch(&self.backend.git()?, workdir, source, paths, cancel)
+    }
+
+    fn apply_patch(
+        &self,
+        patch: &[u8],
+        action: LineAction,
+        cancel: &CancellationToken,
+    ) -> Result<(), GitError> {
+        // The patch's whitespace is the file's own, so the user's
+        // `apply.whitespace` mustn't refuse or "fix" it.
+        let mut args = vec!["apply", "--whitespace=nowarn"];
+        if action != LineAction::Discard {
+            args.push("--cached");
+        }
+        if action.reverses() {
+            args.push("--reverse");
+        }
+        args.push("-");
+        self.run_git(&args, patch, cancel)
     }
 
     fn stage(&self, paths: &[String], cancel: &CancellationToken) -> Result<(), GitError> {

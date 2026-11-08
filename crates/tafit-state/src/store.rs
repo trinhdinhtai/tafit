@@ -8,7 +8,7 @@ use tafit_core::{
 };
 
 use crate::watch::{self, WatchHandle, WatchOptions};
-use crate::{AppState, DiffLayout, Effect, LineChange, Msg, RepoId, reduce};
+use crate::{AppState, Effect, LineChange, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -221,7 +221,6 @@ impl StoreWorker {
                 path,
                 source,
                 paths,
-                layout,
                 whitespace,
             } => {
                 let read = CancellationToken::default();
@@ -229,9 +228,9 @@ impl StoreWorker {
                     older.cancel();
                 }
                 self.repo_load.execute(move || {
-                    let result = backend.open(&path, &read).and_then(|repo| {
-                        read_diff(&*repo, source, &paths, layout, whitespace, &read)
-                    });
+                    let result = backend
+                        .open(&path, &read)
+                        .and_then(|repo| read_diff(&*repo, source, &paths, whitespace, &read));
                     let _ = commands.send(Command::Msg(Msg::DiffLoaded {
                         repo_id,
                         request,
@@ -290,35 +289,17 @@ impl StoreWorker {
     }
 }
 
-/// The Line Diff of one file as `layout` shows it.
+/// The Line Diff of one file: git's hunks with their changed words, which
+/// the UI lays out in one column or two (ADR-0006).
 fn read_diff(
     repo: &dyn GitRepository,
     source: DiffSource,
     paths: &[String],
-    layout: DiffLayout,
     whitespace: WhitespaceMode,
     cancel: &CancellationToken,
 ) -> Result<FileDiff, GitError> {
-    match layout {
-        DiffLayout::Inline => repo
-            .diff(source, paths, DiffContext::Hunks, whitespace, cancel)
-            .map(|diff| diff.with_highlights(whitespace)),
-        // Read with every whitespace change, so each column has its own
-        // side's text; the alignment, done here off the store thread,
-        // ignores it if asked to.
-        // shortcut: aligning doesn't check `cancel`, so a huge, heavily
-        // changed file finishes aligning after a newer read has replaced
-        // it; Myers' cost cap bounds how long.
-        DiffLayout::TwoColumn => repo
-            .diff(
-                source,
-                paths,
-                DiffContext::WholeFile,
-                WhitespaceMode::Show,
-                cancel,
-            )
-            .map(|diff| diff.into_two_column(whitespace)),
-    }
+    repo.diff(source, paths, DiffContext::Hunks, whitespace, cancel)
+        .map(|diff| diff.with_highlights(whitespace))
 }
 
 /// Builds the patch for `change` from git's diff of the file and applies
@@ -333,14 +314,7 @@ fn apply_lines(
 ) -> Result<(), GitError> {
     let source = change.file.group.diff_source();
     let output = repo.diff_patch(source, &change.paths, cancel)?;
-    let now = read_diff(
-        repo,
-        source,
-        &change.paths,
-        change.layout,
-        change.whitespace,
-        cancel,
-    )?;
+    let now = read_diff(repo, source, &change.paths, change.whitespace, cancel)?;
     // shortcut: this compares the diff as shown, not the file's bytes: an
     // edit the diff doesn't show (whitespace while it is ignored, a line
     // ending, bytes shown lossily) passes, and so does one made after this

@@ -1,5 +1,5 @@
-//! Gives tafit.exe its icon on Windows. GPUI also loads the window icon from
-//! this resource (id 1). A no-op when building for other platforms.
+//! Gives tafit.exe its icon on Windows. A no-op when building for other
+//! platforms.
 
 fn main() {
     println!("cargo:rerun-if-changed=tafit.rc");

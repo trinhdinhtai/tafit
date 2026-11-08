@@ -1,0 +1,21 @@
+[package]
+name = "tafit-ui-rune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rune = { workspace = true }
+rune-kit = { workspace = true }
+tafit-base = { workspace = true }
+tafit-core = { workspace = true }
+tafit-state = { workspace = true }
+
+[dev-dependencies]
+tafit-git-gix = { workspace = true }

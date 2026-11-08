@@ -11,8 +11,8 @@ publish = false
 workspace = true
 
 [features]
-default = ["ui-gpui"]
-ui-gpui = ["tafit-app/ui-gpui"]
+default = ["ui-rune"]
+ui-rune = ["tafit-app/ui-rune"]
 
 [dependencies]
 tafit-app = { workspace = true }

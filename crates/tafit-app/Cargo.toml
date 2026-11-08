@@ -11,14 +11,14 @@ publish = false
 workspace = true
 
 [features]
-default = ["ui-gpui"]
-# The windowed app. Without it the crate builds headless, with no GPUI in the
-# dependency graph (checked in CI).
-ui-gpui = ["dep:tafit-ui-gpui"]
+default = ["ui-rune"]
+# The windowed app, drawn with Rune (ADR-0006). Without it the crate builds
+# headless, with no UI framework in the dependency graph (checked in CI).
+ui-rune = ["dep:tafit-ui-rune"]
 
 [dependencies]
 tafit-base = { workspace = true }
 tafit-core = { workspace = true }
 tafit-git-gix = { workspace = true }
 tafit-state = { workspace = true }
-tafit-ui-gpui = { workspace = true, optional = true }
+tafit-ui-rune = { workspace = true, optional = true }

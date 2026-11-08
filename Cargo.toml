@@ -21,6 +21,7 @@ tafit-state = { path = "crates/tafit-state" }
 tafit-text = { path = "crates/tafit-text" }
 tafit-ui-gpui = { path = "crates/tafit-ui-gpui" }
 tafit-ui-kit = { path = "crates/tafit-ui-kit" }
+tafit-ui-rune = { path = "crates/tafit-ui-rune" }
 
 # External crates
 async-channel = "2.5"
@@ -42,6 +43,10 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Watches the Active Repository's files: ReadDirectoryChangesW on Windows,
 # inotify on Linux, FSEvents on macOS (its default feature).
 notify = "8.2.2"
+# The UI framework and its components (ADR-0006). Pre-release: pinned to a
+# rev of `dev`, which is never rewritten; bump it in its own build commit.
+rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
 # Signals a git command's process group on cancel (Unix); already in the
 # graph through gpui.
 rustix = { version = "1.1.6", features = ["process"] }
@@ -77,6 +82,12 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.harfrust]
+opt-level = 2
+
+[profile.dev.package.rune]
+opt-level = 2
+
+[profile.dev.package.rune-kit]
 opt-level = 2
 
 [profile.dev.package.read-fonts]

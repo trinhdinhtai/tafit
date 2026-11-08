@@ -119,149 +119,13 @@ pub enum WhitespaceMode {
     Ignore,
 }
 
-impl WhitespaceMode {
-    /// What two lines are compared by: the line, or it without whitespace.
-    fn key(self, text: &str) -> String {
-        match self {
-            Self::Show => text.to_owned(),
-            Self::Ignore => text.chars().filter(|c| !c.is_whitespace()).collect(),
-        }
-    }
-}
-
 /// A Line Diff of one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDiff {
     /// The hunks, in file order; none when only the mode changed.
     Text(Vec<Hunk>),
-    /// The whole file in two columns, old beside new, aligned by tafit
-    /// rather than git; empty when no line changed.
-    TwoColumn(Vec<ColumnRow>),
     /// git found binary content; there is nothing to show line by line.
     Binary,
-}
-
-/// One row of a two-column diff: a line of each side that sit side by side.
-/// A side is `None` where the other side's line has no counterpart.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColumnRow {
-    pub old: Option<ColumnLine>,
-    pub new: Option<ColumnLine>,
-}
-
-/// One side's line in a `ColumnRow`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColumnLine {
-    /// 1-based, in that side's file.
-    pub number: u32,
-    /// The line without its line ending.
-    pub text: String,
-    /// The line is removed (old side) or added (new side).
-    pub changed: bool,
-    /// Byte ranges of `text` that changed, when the row's other side is the
-    /// line this one was edited from or into; sorted, never touching.
-    pub highlights: Vec<Range<usize>>,
-    /// The file ends here without a newline.
-    pub no_newline_at_end: bool,
-}
-
-impl FileDiff {
-    /// Lays a `DiffContext::WholeFile` diff out in two columns, aligned by
-    /// tafit: lines unique to both sides anchor the alignment (patience),
-    /// Myers aligns between them. A changed line beside a changed line is a
-    /// line edited in place. With `WhitespaceMode::Ignore`, lines that differ
-    /// only in whitespace align as unchanged. A binary diff stays as it is.
-    pub fn into_two_column(self, whitespace: WhitespaceMode) -> Self {
-        let Self::Text(hunks) = self else {
-            return self;
-        };
-        let lines = hunks.into_iter().flat_map(|hunk| hunk.lines);
-        let (mut old, mut new) = (Vec::new(), Vec::new());
-        for line in lines {
-            let side = |number: Option<u32>| ColumnLine {
-                number: number.unwrap_or_default(),
-                text: line.text.clone(),
-                changed: line.kind != LineKind::Context,
-                highlights: Vec::new(),
-                no_newline_at_end: line.no_newline_at_end,
-            };
-            if line.kind != LineKind::Added {
-                old.push(side(line.old_line));
-            }
-            if line.kind != LineKind::Removed {
-                new.push(side(line.new_line));
-            }
-        }
-        if old.iter().chain(&new).all(|line| !line.changed) {
-            return Self::TwoColumn(Vec::new());
-        }
-        let mut interner = align::Interner::new();
-        let ids = |lines: &[ColumnLine], interner: &mut align::Interner<String>| -> Vec<u32> {
-            lines
-                .iter()
-                .map(|line| interner.id(whitespace.key(&line.text)))
-                .collect()
-        };
-        let old_ids = ids(&old, &mut interner);
-        let new_ids = ids(&new, &mut interner);
-        let ops = align::align_lines(&old_ids, &new_ids);
-        Self::TwoColumn(column_rows(old, new, &ops, whitespace))
-    }
-}
-
-/// Lays `old` and `new` out by `ops`; each run of deleted and inserted lines
-/// between equal ones is paired up row by row.
-fn column_rows(
-    old: Vec<ColumnLine>,
-    new: Vec<ColumnLine>,
-    ops: &[align::Op],
-    whitespace: WhitespaceMode,
-) -> Vec<ColumnRow> {
-    let mut rows = Vec::with_capacity(ops.len());
-    let (mut old, mut new) = (old.into_iter(), new.into_iter());
-    let (mut deleted, mut inserted) = (Vec::new(), Vec::new());
-    let flush = |rows: &mut Vec<ColumnRow>,
-                 deleted: &mut Vec<ColumnLine>,
-                 inserted: &mut Vec<ColumnLine>| {
-        let pairs = deleted.len().max(inserted.len());
-        let (mut d, mut i) = (deleted.drain(..), inserted.drain(..));
-        for _ in 0..pairs {
-            let (mut old, mut new) = (d.next(), i.next());
-            if let (Some(old), Some(new)) = (&mut old, &mut new) {
-                (old.highlights, new.highlights) =
-                    highlight::changed_ranges(&old.text, &new.text, whitespace);
-            }
-            rows.push(ColumnRow { old, new });
-        }
-    };
-    for op in ops {
-        match op {
-            align::Op::Equal => {
-                flush(&mut rows, &mut deleted, &mut inserted);
-                let line = |side: &mut std::vec::IntoIter<ColumnLine>| {
-                    let mut line = side.next().expect("the ops cover both sides");
-                    line.changed = false;
-                    line
-                };
-                rows.push(ColumnRow {
-                    old: Some(line(&mut old)),
-                    new: Some(line(&mut new)),
-                });
-            }
-            align::Op::Delete => {
-                let mut line = old.next().expect("the ops cover the old side");
-                line.changed = true;
-                deleted.push(line);
-            }
-            align::Op::Insert => {
-                let mut line = new.next().expect("the ops cover the new side");
-                line.changed = true;
-                inserted.push(line);
-            }
-        }
-    }
-    flush(&mut rows, &mut deleted, &mut inserted);
-    rows
 }
 
 impl FileDiff {
@@ -439,17 +303,6 @@ impl Hunk {
     }
 }
 
-impl ColumnLine {
-    /// The line as a Line Selection names it, on `side` of its row;
-    /// `None` when unchanged.
-    pub fn line_ref(&self, side: LineSide) -> Option<LineRef> {
-        self.changed.then_some(LineRef {
-            side,
-            number: self.number,
-        })
-    }
-}
-
 impl FileDiff {
     /// Whether `line` is a changed line of this diff, one a Line Selection
     /// can hold.
@@ -459,15 +312,6 @@ impl FileDiff {
                 .iter()
                 .flat_map(|hunk| &hunk.lines)
                 .any(|diff_line| diff_line.line_ref() == Some(line)),
-            Self::TwoColumn(rows) => rows.iter().any(|row| {
-                let column = match line.side {
-                    LineSide::Old => &row.old,
-                    LineSide::New => &row.new,
-                };
-                column
-                    .as_ref()
-                    .is_some_and(|column| column.line_ref(line.side) == Some(line))
-            }),
             Self::Binary => false,
         }
     }

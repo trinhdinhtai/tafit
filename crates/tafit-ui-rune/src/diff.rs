@@ -14,8 +14,7 @@ use rune::{El, KeyEvent, Tx, col, row};
 use rune_kit::diff::{self as kit, DiffMode, DiffView, LineRange, Side};
 use rune_kit::{Button, ButtonVariant, Dialog, Kit, SegmentedControl, Switch};
 use tafit_core::{
-    ColumnRow, FileDiff, Hunk, LineAction, LineKind, LineRef, LineSelection, LineSide,
-    WhitespaceMode,
+    FileDiff, Hunk, LineAction, LineKind, LineRef, LineSelection, LineSide, WhitespaceMode,
 };
 use tafit_state::{DiffLayout, DiffOptions, FileRef, Loadable, Msg, RepoState};
 
@@ -97,7 +96,6 @@ pub(crate) fn diff_pane(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) 
                         .key("diff-binary")
                 }
                 FileDiff::Text(hunks) if hunks.is_empty() => no_changes(k),
-                FileDiff::TwoColumn(rows) if rows.is_empty() => no_changes(k),
                 _ => DiffView::new(|s: &Ui| &s.diff.view, |s: &mut Ui| &mut s.diff.view)
                     .key("diff-lines")
                     .on_select(|s: &mut Ui, picked: Option<LineRange>, _: &mut Tx| {
@@ -289,7 +287,6 @@ fn patch_of(path: &str, diff: &FileDiff) -> String {
                 write_hunk(&mut patch, hunk);
             }
         }
-        FileDiff::TwoColumn(rows) => write_rows(&mut patch, rows),
         FileDiff::Binary => {}
     }
     patch
@@ -308,36 +305,6 @@ fn write_hunk(patch: &mut String, hunk: &Hunk) {
             patch.push_str("\\ No newline at end of file\n");
         }
     }
-}
-
-/// A two-column diff as one hunk over the whole file: a row's old side
-/// before its new side where they differ.
-// shortcut: the store still aligns whole files for two columns; once it
-// reads hunks for both layouts (#36), this goes.
-fn write_rows(patch: &mut String, rows: &[ColumnRow]) {
-    let mut body = String::new();
-    let (mut old_count, mut new_count) = (0, 0);
-    for row in rows {
-        match (&row.old, &row.new) {
-            (Some(old), Some(new)) if !old.changed && !new.changed => {
-                let _ = writeln!(body, " {}", new.text);
-                old_count += 1;
-                new_count += 1;
-            }
-            (old, new) => {
-                if let Some(old) = old {
-                    let _ = writeln!(body, "-{}", old.text);
-                    old_count += 1;
-                }
-                if let Some(new) = new {
-                    let _ = writeln!(body, "+{}", new.text);
-                    new_count += 1;
-                }
-            }
-        }
-    }
-    let _ = writeln!(patch, "@@ -1,{old_count} +1,{new_count} @@");
-    patch.push_str(&body);
 }
 
 fn side_of(side: LineSide) -> Side {

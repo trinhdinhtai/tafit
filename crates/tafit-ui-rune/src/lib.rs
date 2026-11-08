@@ -10,13 +10,13 @@ mod icons;
 mod pages;
 mod status;
 mod tabs;
+mod toolbar;
 
 use std::sync::Arc;
 
 use rune::{Cx, El, col, row, text};
 use rune_kit::Kit;
 use rune_kit::shell::TabDragState;
-use tafit_core::Head;
 use tafit_state::{AppState, AppStore, Loadable, Msg, Page, RepoState, WindowId};
 
 pub use host::run_app as run;
@@ -118,6 +118,7 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         .h_full()
         .fill(k.c.bg_base)
         .child(tabs::tab_bar(s, cx, &k, &mut layer))
+        .children(toolbar::toolbar(s, &k))
         .child(body);
     layer.extend(pages::outdated_git(s, &k));
     rune_kit::root(root, layer)
@@ -127,22 +128,7 @@ fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) -
     match &repo.open {
         Loadable::Loading => centered("Opening…", k.c.text_muted, k),
         Loadable::Error(message) => centered(message, k.c.danger.fg, k).key("repository-error"),
-        Loadable::Ready(info) => {
-            let header = col()
-                .padding(24.0)
-                .gap(6.0)
-                .child(
-                    text(&info.name)
-                        .key("repository-name")
-                        .font(k.ty.body_medium)
-                        .color(k.c.text_strong),
-                )
-                .child(
-                    text(head_label(&info.head))
-                        .key("repository-head")
-                        .font(k.ty.ui)
-                        .color(k.c.text_muted),
-                );
+        Loadable::Ready(_) => {
             // The change list on the left, the selected file's diff beside it.
             let panes = row()
                 .w_full()
@@ -155,17 +141,8 @@ fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) -
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .child(header)
                 .child(panes)
         }
-    }
-}
-
-fn head_label(head: &Head) -> String {
-    match head {
-        Head::Branch(branch) => format!("On branch {branch}"),
-        Head::Unborn(branch) => format!("On branch {branch} (no commits yet)"),
-        Head::Detached(commit) => format!("HEAD detached at {commit}"),
     }
 }
 

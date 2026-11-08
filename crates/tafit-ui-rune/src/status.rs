@@ -14,16 +14,6 @@ use crate::{Ui, centered};
 const ROW_HEIGHT: f32 = 24.0;
 
 pub(crate) fn status_panel(s: &Ui, repo: &RepoState, k: &Kit) -> El {
-    let repo_id = repo.id;
-    let refresh = Button::new(if repo.status_refreshing {
-        "Refreshing…"
-    } else {
-        "Refresh"
-    })
-    .variant(ButtonVariant::Ghost)
-    .on_press(move |s: &mut Ui| s.dispatch(Msg::RefreshStatus(repo_id)))
-    .build(k)
-    .key("status-refresh");
     let header = row()
         .w_full()
         .gap(6.0)
@@ -33,8 +23,7 @@ pub(crate) fn status_panel(s: &Ui, repo: &RepoState, k: &Kit) -> El {
         .child(text("Changes").font(k.ty.ui).color(k.c.text_muted))
         .child(crate::spacer())
         .child(write_button(repo, true, k))
-        .child(write_button(repo, false, k))
-        .child(refresh);
+        .child(write_button(repo, false, k));
     let body = match &repo.status {
         Loadable::Loading => centered("Reading changes…", k.c.text_muted, k),
         Loadable::Error(message) => centered(message, k.c.danger.fg, k),

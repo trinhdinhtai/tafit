@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
-    CancellationToken, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError, GitRepository,
-    Head, RepositoryInfo, RepositoryStatus,
+    CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError,
+    GitRepository, Head, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 
 use crate::cli::GitCli;
@@ -153,12 +153,22 @@ impl GitRepository for GixRepository {
         &self,
         source: DiffSource,
         paths: &[String],
+        context: DiffContext,
+        whitespace: WhitespaceMode,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError> {
         let workdir = self.workdir.as_deref().ok_or_else(|| {
             GitError::Backend("a bare Repository has no work tree to diff".to_owned())
         })?;
-        diff::diff(&self.backend.git()?, workdir, source, paths, cancel)
+        diff::diff(
+            &self.backend.git()?,
+            workdir,
+            source,
+            paths,
+            context,
+            whitespace,
+            cancel,
+        )
     }
 
     fn stage(&self, paths: &[String], cancel: &CancellationToken) -> Result<(), GitError> {

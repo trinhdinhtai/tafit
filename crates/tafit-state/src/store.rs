@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::thread;
 
-use tafit_core::{CancellationToken, GitBackend};
+use tafit_core::{CancellationToken, DiffContext, GitBackend, WhitespaceMode};
 
-use crate::{AppState, Effect, Msg, RepoId, reduce};
+use crate::{AppState, DiffLayout, Effect, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -173,15 +173,34 @@ impl StoreWorker {
                 path,
                 source,
                 paths,
+                layout,
+                whitespace,
             } => {
                 let read = CancellationToken::default();
                 if let Some(older) = self.diff_reads.insert(repo_id, read.clone()) {
                     older.cancel();
                 }
                 self.repo_load.execute(move || {
-                    let result = backend
-                        .open(&path, &read)
-                        .and_then(|repo| repo.diff(source, &paths, &read));
+                    let result = backend.open(&path, &read).and_then(|repo| match layout {
+                        DiffLayout::Inline => repo
+                            .diff(source, &paths, DiffContext::Hunks, whitespace, &read)
+                            .map(|diff| diff.with_highlights(whitespace)),
+                        // Read with every whitespace change, so each column
+                        // has its own side's text; the alignment, done here
+                        // off the store thread, ignores it if asked to.
+                        // shortcut: aligning doesn't check `read`, so a huge,
+                        // heavily changed file finishes aligning after a newer
+                        // read has replaced it; Myers' cost cap bounds how long.
+                        DiffLayout::TwoColumn => repo
+                            .diff(
+                                source,
+                                &paths,
+                                DiffContext::WholeFile,
+                                WhitespaceMode::Show,
+                                &read,
+                            )
+                            .map(|diff| diff.into_two_column(whitespace)),
+                    });
                     let _ = commands.send(Command::Msg(Msg::DiffLoaded {
                         repo_id,
                         request,

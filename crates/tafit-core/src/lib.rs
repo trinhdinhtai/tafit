@@ -1,5 +1,9 @@
 //! Domain types and the Git backend interface. Never depends on GPUI.
 
+mod align;
+mod highlight;
+
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,13 +82,169 @@ pub enum DiffSource {
     Untracked,
 }
 
+/// How much of a file a diff read covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffContext {
+    /// The changed lines with a few lines of context around them, as git
+    /// shows hunks by default.
+    Hunks,
+    /// Every line of the file, as one hunk; for aligning the whole file.
+    WholeFile,
+}
+
+/// Whether a Line Diff counts changes in whitespace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WhitespaceMode {
+    #[default]
+    Show,
+    /// Lines that differ only in whitespace are the same line, as with
+    /// `git diff --ignore-all-space`.
+    Ignore,
+}
+
+impl WhitespaceMode {
+    /// What two lines are compared by: the line, or it without whitespace.
+    fn key(self, text: &str) -> String {
+        match self {
+            Self::Show => text.to_owned(),
+            Self::Ignore => text.chars().filter(|c| !c.is_whitespace()).collect(),
+        }
+    }
+}
+
 /// A Line Diff of one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDiff {
     /// The hunks, in file order; none when only the mode changed.
     Text(Vec<Hunk>),
+    /// The whole file in two columns, old beside new, aligned by tafit
+    /// rather than git; empty when no line changed.
+    TwoColumn(Vec<ColumnRow>),
     /// git found binary content; there is nothing to show line by line.
     Binary,
+}
+
+/// One row of a two-column diff: a line of each side that sit side by side.
+/// A side is `None` where the other side's line has no counterpart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnRow {
+    pub old: Option<ColumnLine>,
+    pub new: Option<ColumnLine>,
+}
+
+/// One side's line in a `ColumnRow`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnLine {
+    /// 1-based, in that side's file.
+    pub number: u32,
+    /// The line without its line ending.
+    pub text: String,
+    /// The line is removed (old side) or added (new side).
+    pub changed: bool,
+    /// Byte ranges of `text` that changed, when the row's other side is the
+    /// line this one was edited from or into; sorted, never touching.
+    pub highlights: Vec<Range<usize>>,
+    /// The file ends here without a newline.
+    pub no_newline_at_end: bool,
+}
+
+impl FileDiff {
+    /// Lays a `DiffContext::WholeFile` diff out in two columns, aligned by
+    /// tafit: lines unique to both sides anchor the alignment (patience),
+    /// Myers aligns between them. A changed line beside a changed line is a
+    /// line edited in place. With `WhitespaceMode::Ignore`, lines that differ
+    /// only in whitespace align as unchanged. A binary diff stays as it is.
+    pub fn into_two_column(self, whitespace: WhitespaceMode) -> Self {
+        let Self::Text(hunks) = self else {
+            return self;
+        };
+        let lines = hunks.into_iter().flat_map(|hunk| hunk.lines);
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        for line in lines {
+            let side = |number: Option<u32>| ColumnLine {
+                number: number.unwrap_or_default(),
+                text: line.text.clone(),
+                changed: line.kind != LineKind::Context,
+                highlights: Vec::new(),
+                no_newline_at_end: line.no_newline_at_end,
+            };
+            if line.kind != LineKind::Added {
+                old.push(side(line.old_line));
+            }
+            if line.kind != LineKind::Removed {
+                new.push(side(line.new_line));
+            }
+        }
+        if old.iter().chain(&new).all(|line| !line.changed) {
+            return Self::TwoColumn(Vec::new());
+        }
+        let mut interner = align::Interner::new();
+        let ids = |lines: &[ColumnLine], interner: &mut align::Interner<String>| -> Vec<u32> {
+            lines
+                .iter()
+                .map(|line| interner.id(whitespace.key(&line.text)))
+                .collect()
+        };
+        let old_ids = ids(&old, &mut interner);
+        let new_ids = ids(&new, &mut interner);
+        let ops = align::align_lines(&old_ids, &new_ids);
+        Self::TwoColumn(column_rows(old, new, &ops, whitespace))
+    }
+}
+
+/// Lays `old` and `new` out by `ops`; each run of deleted and inserted lines
+/// between equal ones is paired up row by row.
+fn column_rows(
+    old: Vec<ColumnLine>,
+    new: Vec<ColumnLine>,
+    ops: &[align::Op],
+    whitespace: WhitespaceMode,
+) -> Vec<ColumnRow> {
+    let mut rows = Vec::with_capacity(ops.len());
+    let (mut old, mut new) = (old.into_iter(), new.into_iter());
+    let (mut deleted, mut inserted) = (Vec::new(), Vec::new());
+    let flush = |rows: &mut Vec<ColumnRow>,
+                 deleted: &mut Vec<ColumnLine>,
+                 inserted: &mut Vec<ColumnLine>| {
+        let pairs = deleted.len().max(inserted.len());
+        let (mut d, mut i) = (deleted.drain(..), inserted.drain(..));
+        for _ in 0..pairs {
+            let (mut old, mut new) = (d.next(), i.next());
+            if let (Some(old), Some(new)) = (&mut old, &mut new) {
+                (old.highlights, new.highlights) =
+                    highlight::changed_ranges(&old.text, &new.text, whitespace);
+            }
+            rows.push(ColumnRow { old, new });
+        }
+    };
+    for op in ops {
+        match op {
+            align::Op::Equal => {
+                flush(&mut rows, &mut deleted, &mut inserted);
+                let line = |side: &mut std::vec::IntoIter<ColumnLine>| {
+                    let mut line = side.next().expect("the ops cover both sides");
+                    line.changed = false;
+                    line
+                };
+                rows.push(ColumnRow {
+                    old: Some(line(&mut old)),
+                    new: Some(line(&mut new)),
+                });
+            }
+            align::Op::Delete => {
+                let mut line = old.next().expect("the ops cover the old side");
+                line.changed = true;
+                deleted.push(line);
+            }
+            align::Op::Insert => {
+                let mut line = new.next().expect("the ops cover the new side");
+                line.changed = true;
+                inserted.push(line);
+            }
+        }
+    }
+    flush(&mut rows, &mut deleted, &mut inserted);
+    rows
 }
 
 impl FileDiff {
@@ -132,6 +292,7 @@ impl FileDiff {
                     // need the exact bytes.
                     text: String::from_utf8_lossy(text.strip_suffix(b"\r").unwrap_or(text))
                         .into_owned(),
+                    highlights: Vec::new(),
                     no_newline_at_end: false,
                 });
             } else if let Some(hunk) = Hunk::parse_header(raw) {
@@ -143,6 +304,40 @@ impl FileDiff {
             }
         }
         Self::Text(hunks)
+    }
+
+    /// Highlights what changed within lines: in each run of removed lines
+    /// followed by added ones, the first removed line pairs with the first
+    /// added one, the second with the second, and so on. With
+    /// `WhitespaceMode::Ignore`, whitespace is never highlighted as changed.
+    pub fn with_highlights(mut self, whitespace: WhitespaceMode) -> Self {
+        if let Self::Text(hunks) = &mut self {
+            for hunk in hunks {
+                let mut ix = 0;
+                while ix < hunk.lines.len() {
+                    let removed = hunk.lines[ix..]
+                        .iter()
+                        .take_while(|line| line.kind == LineKind::Removed)
+                        .count();
+                    let added = hunk.lines[ix + removed..]
+                        .iter()
+                        .take_while(|line| line.kind == LineKind::Added)
+                        .count();
+                    for pair in 0..removed.min(added) {
+                        let (old, new) = (ix + pair, ix + removed + pair);
+                        let (old_ranges, new_ranges) = highlight::changed_ranges(
+                            &hunk.lines[old].text,
+                            &hunk.lines[new].text,
+                            whitespace,
+                        );
+                        hunk.lines[old].highlights = old_ranges;
+                        hunk.lines[new].highlights = new_ranges;
+                    }
+                    ix += (removed + added).max(1);
+                }
+            }
+        }
+        self
     }
 }
 
@@ -201,6 +396,10 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
     /// The line without its `+`/`-`/` ` marker and line ending.
     pub text: String,
+    /// Byte ranges of `text` that changed, on a removed line shown with the
+    /// added line that replaced it and the other way round; sorted, never
+    /// touching. Empty until `FileDiff::with_highlights`.
+    pub highlights: Vec<Range<usize>>,
     /// The file ends here without a newline.
     pub no_newline_at_end: bool,
 }
@@ -361,6 +560,7 @@ pub trait GitRepository: Send + Sync {
     fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError>;
 
     /// The Line Diff of one file from `source`, read from `git diff` with a
+    /// `context` and `whitespace` mode chosen by tafit and otherwise a
     /// fixed config so the user's (external diff, color, quotepath) can't
     /// change it (ADR-0002). `paths` is the file's repo-relative path, or a
     /// rename's old path then new path.
@@ -368,6 +568,8 @@ pub trait GitRepository: Send + Sync {
         &self,
         source: DiffSource,
         paths: &[String],
+        context: DiffContext,
+        whitespace: WhitespaceMode,
         cancel: &CancellationToken,
     ) -> Result<FileDiff, GitError>;
 

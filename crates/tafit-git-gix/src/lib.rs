@@ -8,9 +8,12 @@ mod status;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gix::bstr::BStr;
+
 use tafit_core::{
     CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError,
-    GitRepository, Head, LineAction, RepositoryInfo, RepositoryStatus, WhitespaceMode,
+    GitRepository, Head, LineAction, RepositoryInfo, RepositoryPaths, RepositoryStatus,
+    WhitespaceMode,
 };
 
 use crate::cli::GitCli;
@@ -143,6 +146,47 @@ impl GitRepository for GixRepository {
             name: repository_name(&repo),
             head,
         })
+    }
+
+    fn paths(&self) -> RepositoryPaths {
+        RepositoryPaths {
+            workdir: self.workdir.clone(),
+            git_dir: self.repo.git_dir().to_owned(),
+            common_dir: self.repo.to_thread_local().common_dir().to_owned(),
+        }
+    }
+
+    fn ignored(&self, paths: &[String], cancel: &CancellationToken) -> Result<Vec<bool>, GitError> {
+        cancel.check()?;
+        if self.workdir.is_none() {
+            return Ok(vec![false; paths.len()]);
+        }
+        let repo = self.repo.to_thread_local();
+        let index = repo.index_or_empty().map_err(backend_error)?;
+        let mut excludes = repo
+            .excludes(
+                &index,
+                None,
+                gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+            )
+            .map_err(backend_error)?;
+        paths
+            .iter()
+            .map(|path| {
+                let (path, dir) = match path.strip_suffix('/') {
+                    Some(dir) => (dir, true),
+                    None => (path.as_str(), false),
+                };
+                if !dir && index.entry_by_path(BStr::new(path)).is_some() {
+                    return Ok(false);
+                }
+                let mode = dir.then_some(gix::index::entry::Mode::DIR);
+                excludes
+                    .at_entry(BStr::new(path), mode)
+                    .map(|platform| platform.is_excluded())
+                    .map_err(backend_error)
+            })
+            .collect()
     }
 
     fn status(&self, cancel: &CancellationToken) -> Result<RepositoryStatus, GitError> {

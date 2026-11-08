@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name = "switch_tab"
 harness = false
+
+[[bench]]
+name = "background_refresh"
+harness = false

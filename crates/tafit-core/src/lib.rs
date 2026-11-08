@@ -30,6 +30,19 @@ pub struct RepositoryInfo {
     pub head: Head,
 }
 
+/// Where a Repository's files are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryPaths {
+    /// The work tree; `None` for a bare Repository.
+    pub workdir: Option<PathBuf>,
+    /// This work tree's own git dir: its HEAD, index and in-progress
+    /// operations.
+    pub git_dir: PathBuf,
+    /// The git dir every Worktree of the Repository shares: refs and config.
+    /// The same as `git_dir` except in a linked Worktree.
+    pub common_dir: PathBuf,
+}
+
 /// How one file changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
@@ -612,6 +625,14 @@ pub trait GitBackend: Send + Sync {
 /// the system git (ADR-0002), so the user's hooks and config apply.
 pub trait GitRepository: Send + Sync {
     fn info(&self, cancel: &CancellationToken) -> Result<RepositoryInfo, GitError>;
+
+    /// Where the Repository's files are, for watching them.
+    fn paths(&self) -> RepositoryPaths;
+
+    /// Whether git ignores each repo-relative path (`/`-separated, ending in
+    /// `/` for a directory), as `git status` does: a tracked file never is,
+    /// and neither is anything for a bare Repository.
+    fn ignored(&self, paths: &[String], cancel: &CancellationToken) -> Result<Vec<bool>, GitError>;
 
     /// The change list: staged, unstaged and untracked files. Empty for a
     /// bare Repository, which has no work tree.

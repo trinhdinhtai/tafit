@@ -53,7 +53,8 @@ jobs:
   perf:
     name: Performance budgets
     # The pull-request set: open a fixture Repository, idle CPU with 1 and 10
-    # Repositories, a tab switch among 20, and a status refresh. The full set
+    # Repositories, a tab switch among 20, a status refresh, and a refresh
+    # after a file changes outside the app. The full set
     # runs nightly (perf-nightly.yml).
     runs-on: ubuntu-24.04
     timeout-minutes: 60

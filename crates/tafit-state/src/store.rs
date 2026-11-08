@@ -7,6 +7,7 @@ use tafit_core::{
     LineAction, LinePatchError, WhitespaceMode, line_patch,
 };
 
+use crate::watch::{self, WatchHandle, WatchOptions};
 use crate::{AppState, DiffLayout, Effect, LineChange, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
@@ -39,6 +40,22 @@ impl AppStore {
 
     /// Starts from `initial` instead of an empty state (restored Session, tests).
     pub fn with_state(backend: Arc<dyn GitBackend>, initial: AppState) -> (Self, StoreEvents) {
+        Self::start(backend, initial, WatchOptions::default())
+    }
+
+    /// Watches Repositories with `options` instead of the app's (tests).
+    pub fn with_watch_options(
+        backend: Arc<dyn GitBackend>,
+        options: WatchOptions,
+    ) -> (Self, StoreEvents) {
+        Self::start(backend, AppState::default(), options)
+    }
+
+    fn start(
+        backend: Arc<dyn GitBackend>,
+        initial: AppState,
+        watch_options: WatchOptions,
+    ) -> (Self, StoreEvents) {
         let (commands, receiver) = mpsc::channel();
         // Capacity 1: a pending event already tells the UI to re-read the snapshot.
         let (events_tx, events_rx) = async_channel::bounded(1);
@@ -52,6 +69,8 @@ impl AppStore {
             cancel: CancellationToken::default(),
             status_reads: HashMap::new(),
             diff_reads: HashMap::new(),
+            watch_options,
+            watches: HashMap::new(),
         };
         thread::Builder::new()
             .name("tafit-store".to_owned())
@@ -100,6 +119,9 @@ struct StoreWorker {
     status_reads: HashMap<RepoId, CancellationToken>,
     /// Each Repository's latest diff read, cancelled the same way.
     diff_reads: HashMap<RepoId, CancellationToken>,
+    watch_options: WatchOptions,
+    /// The watched Repositories; dropping a handle stops its watch.
+    watches: HashMap<RepoId, WatchHandle>,
 }
 
 impl StoreWorker {
@@ -126,6 +148,7 @@ impl StoreWorker {
         for read in self.status_reads.values().chain(self.diff_reads.values()) {
             read.cancel();
         }
+        self.watches.clear();
     }
 
     fn schedule(&mut self, effect: Effect) {
@@ -145,6 +168,28 @@ impl StoreWorker {
                         read.cancel();
                     }
                 }
+                self.watches.remove(&repo_id);
+            }
+            Effect::Watch {
+                repo_id,
+                session,
+                path,
+            } => {
+                let (watch, start) = watch::prepare(
+                    backend,
+                    repo_id,
+                    session,
+                    path,
+                    self.watch_options.clone(),
+                    move |msg| {
+                        let _ = commands.send(Command::Msg(msg));
+                    },
+                );
+                self.watches.insert(repo_id, watch);
+                self.repo_load.execute(start);
+            }
+            Effect::Unwatch { repo_id } => {
+                self.watches.remove(&repo_id);
             }
             Effect::DetectGit { request } => self.repo_load.execute(move || {
                 let result = backend.detect_git(&cancel);

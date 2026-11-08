@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-channel = { workspace = true }
+notify = { workspace = true }
 tafit-core = { workspace = true }
 
 [dev-dependencies]

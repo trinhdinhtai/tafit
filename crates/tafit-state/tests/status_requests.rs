@@ -31,7 +31,11 @@ fn opened() -> (AppState, RepoId, StatusRequestId) {
             }),
         },
     );
-    (state, repo_id, only_status_read(effects))
+    // Opened, the Active Repository is also watched.
+    match &effects[..] {
+        [Effect::LoadStatus { request, .. }, Effect::Watch { .. }] => (state, repo_id, *request),
+        other => panic!("expected a status read and a watch, got {other:?}"),
+    }
 }
 
 fn only_status_read(effects: Vec<Effect>) -> StatusRequestId {

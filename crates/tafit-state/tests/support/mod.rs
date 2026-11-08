@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppState, AppStore, Msg, StoreEvents};
+use tafit_state::{AppState, AppStore, Msg, StoreEvents, WatchOptions};
 use tempfile::TempDir;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -294,6 +294,13 @@ impl TestStore {
 
     fn with_backend(backend: GixBackend) -> Self {
         let (store, events) = AppStore::new(Arc::new(backend));
+        Self { store, events }
+    }
+
+    /// Watches Repositories with `options` instead of the app's.
+    pub fn with_watch_options(options: WatchOptions) -> Self {
+        let (store, events) =
+            AppStore::with_watch_options(Arc::new(GixBackend::default()), options);
         Self { store, events }
     }
 

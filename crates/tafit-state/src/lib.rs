@@ -865,6 +865,13 @@ pub enum Msg {
         line: LineRef,
         mode: SelectMode,
     },
+    /// Make `lines` the Line Selection of the shown diff, as a range picked
+    /// across its line numbers does; lines that aren't its changes are left
+    /// out.
+    SelectLines {
+        repo_id: RepoId,
+        lines: LineSelection,
+    },
     /// Apply `action` to the Line Selection of the shown diff. A Discard
     /// waits in `RepoState::confirm_discard` until confirmed.
     ApplyLines {
@@ -1239,6 +1246,18 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                         }
                     }
                 }
+            }
+            Vec::new()
+        }
+        Msg::SelectLines { repo_id, lines } => {
+            if let Some(repo) = state.repo_mut(repo_id)
+                && let Some(diff) = &mut repo.diff
+                && let Loadable::Ready(shown) = &diff.diff
+            {
+                diff.lines = lines
+                    .into_iter()
+                    .filter(|&line| shown.has_change(line))
+                    .collect();
             }
             Vec::new()
         }

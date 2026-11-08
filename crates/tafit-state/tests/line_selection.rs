@@ -143,6 +143,30 @@ fn lines_selected_in_several_hunks_are_staged_together() {
 }
 
 #[test]
+fn selecting_a_range_replaces_the_line_selection_with_its_changes() {
+    let repo = TestRepo::init("repo");
+    repo.commit_files(&[("a.txt", "one\ntwo\nthree\n")], "base");
+    repo.write("a.txt", "one\nTWO\nthree\nfour\n");
+    let (store, repo_id) = open(&repo);
+    show(&store, repo_id, ChangeGroup::Unstaged, "a.txt");
+    select_lines(&store, repo_id, &[new(4)]);
+
+    // A range over the edit, its context line included.
+    store.dispatch(Msg::SelectLines {
+        repo_id,
+        lines: [old(1), old(2), new(2), new(3)].into_iter().collect(),
+    });
+    let state = wait_settled(&store);
+
+    let diff = active(&state).diff.as_ref().expect("one file is selected");
+    assert_eq!(
+        diff.lines,
+        [old(2), new(2)].into_iter().collect(),
+        "the context lines are left out and the earlier selection is gone"
+    );
+}
+
+#[test]
 fn unstaging_one_line_leaves_the_rest_staged_and_the_work_tree_alone() {
     let repo = TestRepo::init("repo");
     repo.commit_files(&[("a.txt", "one\ntwo\nthree\n")], "base");

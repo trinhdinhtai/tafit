@@ -70,6 +70,7 @@ fn window_spec(shared: &Arc<Shared>, id: WindowId) -> WindowSpec<Ui> {
     let ready = Arc::clone(shared);
     WindowSpec::from_app(window_key(id), app)
         .on_focus(on_focus)
+        .on_modifiers(on_modifiers)
         .on_ready(move |handle| {
             lock(&ready.open).insert(id, handle.clone());
         })
@@ -140,4 +141,8 @@ fn on_focus(s: &mut Ui, focused: bool, _: &mut Tx) {
     if focused {
         s.dispatch(Msg::FocusWindow(s.window));
     }
+}
+
+fn on_modifiers(s: &mut Ui, mods: rune::Mods, _: &mut Tx) {
+    s.mods = mods;
 }

@@ -6,6 +6,7 @@
 mod fonts;
 mod host;
 mod pages;
+mod status;
 mod tabs;
 
 use std::sync::Arc;
@@ -29,19 +30,30 @@ pub(crate) struct Ui {
     raised: u64,
     /// A Repository Tab being dragged along the strip.
     tab_drag: TabDragState,
+    /// The modifier keys held, for Ctrl/Cmd-click.
+    mods: rune::Mods,
+    /// The commit message box. Every edit goes to the store.
+    commit: rune::TextEdit,
+    /// The Repository and commit count the box last took its text from.
+    commit_source: Option<(tafit_state::RepoId, u64)>,
 }
 
 impl Ui {
     fn new(shared: Arc<host::Shared>, window: WindowId) -> Self {
         let state = shared.store.snapshot();
         let raised = state.window(window).map_or(0, |w| w.raise_requests);
-        Self {
+        let mut ui = Self {
             shared,
             window,
             state,
             raised,
             tab_drag: TabDragState::default(),
-        }
+            mods: rune::Mods::default(),
+            commit: rune::TextEdit::new(""),
+            commit_source: None,
+        };
+        ui.sync_commit_message();
+        ui
     }
 
     fn store(&self) -> &AppStore {
@@ -66,6 +78,7 @@ impl Ui {
             return false;
         }
         self.state = latest;
+        self.sync_commit_message();
         true
     }
 }
@@ -87,7 +100,7 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         // Without git nothing can be written, so this blocks the Window.
         _ if let Loadable::Error(error) = &state.git => pages::git_unavailable(error, &k),
         (_, None) => pages::open_repository(state, s.window, &k),
-        (_, Some(repo)) => repository_tab_body(repo, &k),
+        (_, Some(repo)) => repository_tab_body(s, repo, &k),
     };
     let root = col()
         .key("window")
@@ -100,12 +113,12 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     rune_kit::root(root, layer)
 }
 
-fn repository_tab_body(repo: &RepoState, k: &Kit) -> El {
+fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit) -> El {
     match &repo.open {
         Loadable::Loading => centered("Opening…", k.c.text_muted, k),
         Loadable::Error(message) => centered(message, k.c.danger.fg, k).key("repository-error"),
-        Loadable::Ready(info) => col().key("repository").w_full().grow(1.0).min_h(0.0).child(
-            col()
+        Loadable::Ready(info) => {
+            let header = col()
                 .padding(24.0)
                 .gap(6.0)
                 .child(
@@ -119,8 +132,21 @@ fn repository_tab_body(repo: &RepoState, k: &Kit) -> El {
                         .key("repository-head")
                         .font(k.ty.ui)
                         .color(k.c.text_muted),
-                ),
-        ),
+                );
+            // The change list on the left, the selected file's diff beside it.
+            let panes = row()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .child(status::status_panel(s, repo, k));
+            col()
+                .key("repository")
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .child(header)
+                .child(panes)
+        }
     }
 }
 

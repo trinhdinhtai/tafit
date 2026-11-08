@@ -6,6 +6,7 @@
 mod diff;
 mod fonts;
 mod host;
+mod icons;
 mod pages;
 mod status;
 mod tabs;
@@ -31,6 +32,8 @@ pub(crate) struct Ui {
     raised: u64,
     /// A Repository Tab being dragged along the strip.
     tab_drag: TabDragState,
+    /// The outdated-git toast was closed; it shows again on the next run.
+    git_notice_closed: bool,
     /// The modifier keys held, for Ctrl/Cmd-click.
     mods: rune::Mods,
     /// The commit message box. Every edit goes to the store.
@@ -51,6 +54,7 @@ impl Ui {
             state,
             raised,
             tab_drag: TabDragState::default(),
+            git_notice_closed: false,
             mods: rune::Mods::default(),
             commit: rune::TextEdit::new(""),
             commit_source: None,
@@ -114,8 +118,8 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         .h_full()
         .fill(k.c.bg_base)
         .child(tabs::tab_bar(s, cx, &k, &mut layer))
-        .children(pages::outdated_git(state, &k))
         .child(body);
+    layer.extend(pages::outdated_git(s, &k));
     rune_kit::root(root, layer)
 }
 

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use rune::{El, FileDialogOptions, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, Kit};
+use rune_kit::{Button, ButtonVariant, Kit, Toast, ToastRegion};
 use tafit_core::{GitEnvironment, GitError, GitVersion};
 use tafit_state::{AppState, Loadable, Msg, Page, WindowId};
 
@@ -235,36 +235,28 @@ impl ProgramLabels {
 }
 
 /// Non-blocking: an old git keeps working, but the user should update it.
-pub(crate) fn outdated_git(state: &AppState, k: &Kit) -> Option<El> {
-    let Loadable::Ready(git) = &state.git else {
+pub(crate) fn outdated_git(s: &Ui, k: &Kit) -> Option<El> {
+    let Loadable::Ready(git) = &s.state.git else {
         return None;
     };
-    if git.version.is_supported() {
+    if git.version.is_supported() || s.git_notice_closed {
         return None;
     }
     let message = format!(
-        "Git {} is older than {}. tafit still works, but some features may not. Please update Git.",
+        "Git {} is older than {}. tafit still works, but some features may not.",
         git.version.text,
         GitVersion::minimum_text()
     );
-    Some(
-        row()
-            .key("git-outdated-notice")
-            .w_full()
-            .gap(12.0)
-            .px(14.0)
-            .py(8.0)
-            .items_center()
-            .fill(k.c.layer_01)
-            .child(
-                text(message)
-                    .grow(1.0)
-                    .font(k.ty.ui)
-                    .color(k.c.warning.fg)
-                    .wrap(),
-            )
-            .child(download_git_button(k)),
-    )
+    let toast = Toast::new("git-outdated-notice", "Please update Git")
+        .description(message)
+        .lead(rune::icon(&crate::icons::WARNING, 16.0).color(k.c.warning.fg))
+        .closable()
+        .on_close(|s: &mut Ui| s.git_notice_closed = true)
+        .action(k, "Download Git", true, |_: &mut Ui, tx: &mut Tx| {
+            open_git_download(tx);
+        })
+        .build(k);
+    Some(ToastRegion::new().toast(toast).build(k))
 }
 
 /// Blocking: shown in place of the Repository Tab when git can't be run.
@@ -310,16 +302,18 @@ pub(crate) fn git_unavailable(error: &GitError, k: &Kit) -> El {
 
 fn download_git_button(k: &Kit) -> El {
     Button::new("Download Git")
-        .on_press_tx(|_: &mut Ui, tx: &mut Tx| {
-            if let Err(err) = tx.open_url(GIT_DOWNLOAD_URL) {
-                eprintln!(
-                    "{}: could not open {GIT_DOWNLOAD_URL}: {err}",
-                    tafit_base::APP_NAME
-                );
-            }
-        })
+        .on_press_tx(|_: &mut Ui, tx: &mut Tx| open_git_download(tx))
         .build(k)
         .key("download-git")
+}
+
+fn open_git_download(tx: &mut Tx) {
+    if let Err(err) = tx.open_url(GIT_DOWNLOAD_URL) {
+        eprintln!(
+            "{}: could not open {GIT_DOWNLOAD_URL}: {err}",
+            tafit_base::APP_NAME
+        );
+    }
 }
 
 fn install_hint() -> &'static str {

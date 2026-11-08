@@ -35,6 +35,14 @@ pub const BUDGETS: &[Budget] = &[
         limit: Limit::Time(Duration::from_micros(500)),
         suite: Suite::Pr,
     },
+    // A file written outside the app, until the watch has the change list
+    // of a 10,000-file Repository re-read and published. About 32 ms on a
+    // Windows dev machine.
+    Budget {
+        benchmark: "background_refresh/10k_files",
+        limit: Limit::Time(Duration::from_millis(100)),
+        suite: Suite::Pr,
+    },
     Budget {
         benchmark: "idle_cpu/1_repo",
         limit: Limit::CpuShare {

@@ -11,7 +11,9 @@ use criterion::{Criterion, Throughput};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tafit_core::RepositoryStatus;
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents, WindowId};
+use tafit_state::{
+    AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents, Watch, WatchOptions, WindowId,
+};
 use tempfile::TempDir;
 
 /// Selects the full benchmark set; anything else runs the pull-request set.
@@ -158,6 +160,50 @@ impl Store {
     pub fn new() -> Self {
         let (store, events) = AppStore::new(Arc::new(GixBackend::default()));
         Self { store, events }
+    }
+
+    /// An empty store whose watches batch events with `options`.
+    pub fn with_watch_options(options: WatchOptions) -> Self {
+        let (store, events) =
+            AppStore::with_watch_options(Arc::new(GixBackend::default()), options);
+        Self { store, events }
+    }
+
+    /// Blocks until `repo_id` is watched. Panics if the watch is degraded.
+    pub fn wait_until_watched(&self, repo_id: RepoId) {
+        loop {
+            match self.repo(repo_id).watch {
+                Watch::Watching => return,
+                Watch::Degraded(reason) => panic!("the watch is degraded: {reason}"),
+                Watch::Off | Watch::Starting => {}
+            }
+            self.events.recv_blocking().expect("the store is running");
+        }
+    }
+
+    /// Writes the untracked file `name` into `work_tree`, removing `previous`,
+    /// as an editor outside the app would, and blocks until the watch has
+    /// had the change list re-read with that done.
+    pub fn write_outside(
+        &self,
+        repo_id: RepoId,
+        work_tree: &Path,
+        name: &str,
+        previous: Option<&str>,
+    ) {
+        if let Some(previous) = previous {
+            std::fs::remove_file(work_tree.join(previous)).expect("remove the previous file");
+        }
+        std::fs::write(work_tree.join(name), "outside\n").expect("write the file");
+        loop {
+            if let Loadable::Ready(status) = &self.repo(repo_id).status {
+                let has = |path: &str| status.untracked.iter().any(|file| file.path == path);
+                if has(name) && previous.is_none_or(|previous| !has(previous)) {
+                    return;
+                }
+            }
+            self.events.recv_blocking().expect("the store is running");
+        }
     }
 
     /// Opens `path` like `open`, then also waits for its first change list.

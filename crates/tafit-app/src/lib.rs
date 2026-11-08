@@ -44,13 +44,7 @@ fn run_ui(store: AppStore, events: StoreEvents) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[cfg(all(feature = "ui-gpui", not(feature = "ui-rune")))]
-fn run_ui(store: AppStore, events: StoreEvents) -> ExitCode {
-    tafit_ui_gpui::run(Arc::new(store), events);
-    ExitCode::SUCCESS
-}
-
-#[cfg(not(any(feature = "ui-gpui", feature = "ui-rune")))]
+#[cfg(not(feature = "ui-rune"))]
 fn run_ui(_store: AppStore, _events: StoreEvents) -> ExitCode {
     eprintln!("{APP_NAME} was built without a UI (feature `ui-rune`)");
     ExitCode::FAILURE

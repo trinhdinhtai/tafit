@@ -4,12 +4,7 @@
 
 macro_rules! font {
     ($path:literal) => {
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../tafit-ui-kit/assets/fonts/",
-            $path
-        ))
-        .as_slice()
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/", $path)).as_slice()
     };
 }
 

@@ -12,7 +12,6 @@ workspace = true
 
 [features]
 default = ["ui-rune"]
-ui-gpui = ["tafit-app/ui-gpui"]
 ui-rune = ["tafit-app/ui-rune"]
 
 [dependencies]

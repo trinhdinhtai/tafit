@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails if a crate depends on something its layer forbids (ADR-0004, ADR-0005).
+# Fails if a crate depends on something its layer forbids (ADR-0004, ADR-0006).
 # Checks normal and build dependencies for every target platform; dev
 # dependencies are free to cross layers.
 set -euo pipefail
@@ -29,12 +29,10 @@ forbid() {
   fi
 }
 
-gpui='^gpui'
-forbid "tafit-core must not depend on GPUI" "$gpui" tafit-core
-forbid "tafit-state must not depend on GPUI" "$gpui" tafit-state
-forbid "tafit-ui-kit must not depend on tafit-core or tafit-state" \
-  '^tafit-(core|state)$' tafit-ui-kit
-forbid "the headless build (tafit-app without default features) must not pull in GPUI" \
-  "$gpui" tafit-app --no-default-features
+ui='^(rune|rune-kit|winit|wgpu)$'
+forbid "tafit-core must not depend on the UI framework" "$ui" tafit-core
+forbid "tafit-state must not depend on the UI framework" "$ui" tafit-state
+forbid "the headless build (tafit-app without default features) must not pull in the UI framework" \
+  "$ui" tafit-app --no-default-features
 
 exit $status

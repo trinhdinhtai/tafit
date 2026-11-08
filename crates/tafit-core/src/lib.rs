@@ -1,4 +1,5 @@
-//! Domain types and the Git backend interface. Never depends on GPUI.
+//! Domain types and the Git backend interface. Never depends on the UI
+//! framework.
 
 mod align;
 mod highlight;

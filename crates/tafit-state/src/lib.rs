@@ -1,6 +1,6 @@
 //! The MVU store: `Msg` → pure `reduce` → immutable `AppState` snapshot plus
 //! `Effect`s. Effects run on worker threads and report back with a new `Msg`.
-//! Never depends on GPUI.
+//! Never depends on the UI framework.
 
 mod store;
 mod watch;

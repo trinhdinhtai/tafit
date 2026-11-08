@@ -60,6 +60,7 @@ fn window_spec(shared: &Arc<Shared>, id: WindowId) -> WindowSpec<Ui> {
         families: crate::fonts::FAMILIES,
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(crate::diff::on_key),
         ..AppSpec::new(APP_NAME, (1100.0, 720.0), no_init, crate::view)
     };
     let state = Arc::clone(shared);

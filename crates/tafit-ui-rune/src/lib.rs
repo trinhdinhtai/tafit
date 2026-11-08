@@ -3,6 +3,7 @@
 //! own beyond what each window shows (its text edits, tab drag, diff
 //! scroll); every change goes through the store.
 
+mod diff;
 mod fonts;
 mod host;
 mod pages;
@@ -36,6 +37,8 @@ pub(crate) struct Ui {
     commit: rune::TextEdit,
     /// The Repository and commit count the box last took its text from.
     commit_source: Option<(tafit_state::RepoId, u64)>,
+    /// The diff view of the selected file.
+    diff: diff::ShownDiff,
 }
 
 impl Ui {
@@ -51,8 +54,10 @@ impl Ui {
             mods: rune::Mods::default(),
             commit: rune::TextEdit::new(""),
             commit_source: None,
+            diff: diff::ShownDiff::default(),
         };
         ui.sync_commit_message();
+        ui.sync_diff();
         ui
     }
 
@@ -79,6 +84,7 @@ impl Ui {
         }
         self.state = latest;
         self.sync_commit_message();
+        self.sync_diff();
         true
     }
 }
@@ -100,7 +106,7 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         // Without git nothing can be written, so this blocks the Window.
         _ if let Loadable::Error(error) = &state.git => pages::git_unavailable(error, &k),
         (_, None) => pages::open_repository(state, s.window, &k),
-        (_, Some(repo)) => repository_tab_body(s, repo, &k),
+        (_, Some(repo)) => repository_tab_body(s, repo, &k, &mut layer),
     };
     let root = col()
         .key("window")
@@ -113,7 +119,7 @@ fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     rune_kit::root(root, layer)
 }
 
-fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit) -> El {
+fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) -> El {
     match &repo.open {
         Loadable::Loading => centered("Opening…", k.c.text_muted, k),
         Loadable::Error(message) => centered(message, k.c.danger.fg, k).key("repository-error"),
@@ -138,7 +144,8 @@ fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit) -> El {
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .child(status::status_panel(s, repo, k));
+                .child(status::status_panel(s, repo, k))
+                .child(diff::diff_pane(s, repo, k, layer));
             col()
                 .key("repository")
                 .w_full()

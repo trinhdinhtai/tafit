@@ -2,9 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::thread;
 
-use tafit_core::{CancellationToken, DiffContext, GitBackend, WhitespaceMode};
+use tafit_core::{
+    CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitError, GitRepository,
+    LineAction, LinePatchError, WhitespaceMode, line_patch,
+};
 
-use crate::{AppState, DiffLayout, Effect, Msg, RepoId, reduce};
+use crate::{AppState, DiffLayout, Effect, LineChange, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -181,25 +184,8 @@ impl StoreWorker {
                     older.cancel();
                 }
                 self.repo_load.execute(move || {
-                    let result = backend.open(&path, &read).and_then(|repo| match layout {
-                        DiffLayout::Inline => repo
-                            .diff(source, &paths, DiffContext::Hunks, whitespace, &read)
-                            .map(|diff| diff.with_highlights(whitespace)),
-                        // Read with every whitespace change, so each column
-                        // has its own side's text; the alignment, done here
-                        // off the store thread, ignores it if asked to.
-                        // shortcut: aligning doesn't check `read`, so a huge,
-                        // heavily changed file finishes aligning after a newer
-                        // read has replaced it; Myers' cost cap bounds how long.
-                        DiffLayout::TwoColumn => repo
-                            .diff(
-                                source,
-                                &paths,
-                                DiffContext::WholeFile,
-                                WhitespaceMode::Show,
-                                &read,
-                            )
-                            .map(|diff| diff.into_two_column(whitespace)),
+                    let result = backend.open(&path, &read).and_then(|repo| {
+                        read_diff(&*repo, source, &paths, layout, whitespace, &read)
                     });
                     let _ = commands.send(Command::Msg(Msg::DiffLoaded {
                         repo_id,
@@ -208,6 +194,17 @@ impl StoreWorker {
                     }));
                 });
             }
+            Effect::ApplyLines {
+                repo_id,
+                path,
+                change,
+                action,
+            } => self.repo_load.execute(move || {
+                let result = backend
+                    .open(&path, &cancel)
+                    .and_then(|repo| apply_lines(&*repo, &change, action, &cancel));
+                let _ = commands.send(Command::Msg(Msg::IndexUpdated { repo_id, result }));
+            }),
             Effect::Stage {
                 repo_id,
                 path,
@@ -246,6 +243,68 @@ impl StoreWorker {
             }),
         }
     }
+}
+
+/// The Line Diff of one file as `layout` shows it.
+fn read_diff(
+    repo: &dyn GitRepository,
+    source: DiffSource,
+    paths: &[String],
+    layout: DiffLayout,
+    whitespace: WhitespaceMode,
+    cancel: &CancellationToken,
+) -> Result<FileDiff, GitError> {
+    match layout {
+        DiffLayout::Inline => repo
+            .diff(source, paths, DiffContext::Hunks, whitespace, cancel)
+            .map(|diff| diff.with_highlights(whitespace)),
+        // Read with every whitespace change, so each column has its own
+        // side's text; the alignment, done here off the store thread,
+        // ignores it if asked to.
+        // shortcut: aligning doesn't check `cancel`, so a huge, heavily
+        // changed file finishes aligning after a newer read has replaced
+        // it; Myers' cost cap bounds how long.
+        DiffLayout::TwoColumn => repo
+            .diff(
+                source,
+                paths,
+                DiffContext::WholeFile,
+                WhitespaceMode::Show,
+                cancel,
+            )
+            .map(|diff| diff.into_two_column(whitespace)),
+    }
+}
+
+/// Builds the patch for `change` from git's diff of the file and applies
+/// it. The diff the lines were selected in is read again after that one,
+/// so a file changed since the selection, even between the two reads, is
+/// refused as stale rather than patched.
+fn apply_lines(
+    repo: &dyn GitRepository,
+    change: &LineChange,
+    action: LineAction,
+    cancel: &CancellationToken,
+) -> Result<(), GitError> {
+    let source = change.file.group.diff_source();
+    let output = repo.diff_patch(source, &change.paths, cancel)?;
+    let now = read_diff(
+        repo,
+        source,
+        &change.paths,
+        change.layout,
+        change.whitespace,
+        cancel,
+    )?;
+    // shortcut: this compares the diff as shown, not the file's bytes: an
+    // edit the diff doesn't show (whitespace while it is ignored, a line
+    // ending, bytes shown lossily) passes, and so does one made after this
+    // read; git apply's own context check is all that stops those.
+    if now != *change.seen {
+        return Err(LinePatchError::Stale.into());
+    }
+    let patch = line_patch(&output, &change.lines, action)?;
+    repo.apply_patch(&patch, action, cancel)
 }
 
 /// The published snapshot. A panic elsewhere can't leave it half-written (it

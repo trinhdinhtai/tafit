@@ -1,5 +1,7 @@
 # Dùng `gpui-ce` và tự viết bộ widget `ui-kit`, không dùng `gpui-kit`
 
+Đã bị thay thế bởi ADR-0006.
+
 tafit dùng fork `gpui-ce` (Apache-2.0), khai báo là git dependency pin theo một rev cố định, và tự viết toàn bộ widget trong crate `ui-kit` (button, tabs, menu, modal, toast, picker, text input, scrollbar, minimap, theme token, icon, font, window chrome). `ui-kit` không được phụ thuộc `core` hay `state`. Chúng ta chọn cách này để kiểm soát hoàn toàn hiệu năng và hành vi của từng widget, và để được tự chọn bản GPUI (có renderer wgpu trên Windows) thay vì phải theo bản GPUI đi kèm một thư viện widget.
 
 ## Các phương án đã cân nhắc

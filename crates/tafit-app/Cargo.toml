@@ -11,7 +11,7 @@ publish = false
 workspace = true
 
 [features]
-default = ["ui-gpui"]
+default = ["ui-rune"]
 # The windowed app. Without it the crate builds headless, with no GPUI in the
 # dependency graph (checked in CI).
 ui-gpui = ["dep:tafit-ui-gpui"]

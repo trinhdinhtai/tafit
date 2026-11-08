@@ -161,35 +161,19 @@ pub enum DiffLayout {
     /// Removed and added lines in one column, in git's hunks.
     #[default]
     Inline,
-    /// The whole file, old beside new, aligned line by line.
+    /// The same hunks, old beside new.
     TwoColumn,
 }
 
 /// How Line Diffs are shown; the same for every Repository.
 // shortcut: lives only as long as the app runs; the Session (#22) will keep
 // it between runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DiffOptions {
     pub layout: DiffLayout,
     pub whitespace: WhitespaceMode,
     /// Long lines wrap instead of being cut off.
     pub word_wrap: bool,
-    /// Columns a tab advances to the next multiple of.
-    pub tab_size: u8,
-    /// The two columns scroll together.
-    pub sync_scroll: bool,
-}
-
-impl Default for DiffOptions {
-    fn default() -> Self {
-        Self {
-            layout: DiffLayout::default(),
-            whitespace: WhitespaceMode::default(),
-            word_wrap: false,
-            tab_size: 4,
-            sync_scroll: true,
-        }
-    }
 }
 
 /// The Line Diff of the one selected file.
@@ -203,8 +187,8 @@ pub struct DiffState {
     pub lines: LineSelection,
     /// What git is given for the file: it, or a rename's old path then new.
     paths: Vec<String>,
-    /// The layout and whitespace mode the `Ready` diff was read with.
-    read_with: (DiffLayout, WhitespaceMode),
+    /// The whitespace mode the `Ready` diff was read with.
+    read_with: WhitespaceMode,
     /// A newer read of the file runs; `diff` still holds the previous one.
     pub refreshing: bool,
 }
@@ -218,7 +202,6 @@ pub struct LineChange {
     pub lines: LineSelection,
     paths: Vec<String>,
     seen: Arc<FileDiff>,
-    layout: DiffLayout,
     whitespace: WhitespaceMode,
 }
 
@@ -319,8 +302,8 @@ pub struct RepoState {
     pub diff: Option<DiffState>,
     /// The latest diff read; only its result is kept.
     diff_request: DiffRequestId,
-    /// The layout and whitespace mode of the latest diff read.
-    diff_requested_with: (DiffLayout, WhitespaceMode),
+    /// The whitespace mode of the latest diff read.
+    diff_requested_with: WhitespaceMode,
     /// Lines waiting for the user to confirm their Discard, which git can't
     /// undo (`Msg::ConfirmDiscard`, `Msg::CancelDiscard`).
     pub confirm_discard: Option<LineChange>,
@@ -407,7 +390,7 @@ impl RepoState {
     }
 
     /// Points the diff at the one selected file, reading it if it is new or
-    /// `reread` (its content, or how it is laid out, may have changed).
+    /// `reread` (its content, or what it ignores, may have changed).
     /// `None` when nothing is read.
     fn sync_diff(&mut self, reread: bool, options: DiffOptions) -> Option<Effect> {
         let Loadable::Ready(status) = &self.status else {
@@ -442,7 +425,7 @@ impl RepoState {
                 diff: Loadable::Loading,
                 lines: LineSelection::new(),
                 paths: paths.clone(),
-                read_with: (options.layout, options.whitespace),
+                read_with: options.whitespace,
                 refreshing: false,
             });
         }
@@ -450,14 +433,13 @@ impl RepoState {
             diff.refreshing = true;
         }
         self.diff_request = DiffRequestId(self.diff_request.0 + 1);
-        self.diff_requested_with = (options.layout, options.whitespace);
+        self.diff_requested_with = options.whitespace;
         Some(Effect::LoadDiff {
             repo_id: self.id,
             request: self.diff_request,
             path: self.path.clone(),
             source: file.group.diff_source(),
             paths,
-            layout: options.layout,
             whitespace: options.whitespace,
         })
     }
@@ -468,13 +450,12 @@ impl RepoState {
         let Loadable::Ready(seen) = &diff.diff else {
             return None;
         };
-        let (layout, whitespace) = diff.read_with;
+        let whitespace = diff.read_with;
         Some(LineChange {
             file: diff.file.clone(),
             lines,
             paths: diff.paths.clone(),
             seen: Arc::clone(seen),
-            layout,
             whitespace,
         })
     }
@@ -907,9 +888,8 @@ pub enum Msg {
         repo_id: RepoId,
         result: Result<(), GitError>,
     },
-    /// Change how Line Diffs are shown. A new layout or whitespace mode
-    /// re-reads the diffs shown, which keep their previous result until it
-    /// lands.
+    /// Change how Line Diffs are shown. A new whitespace mode re-reads the
+    /// diffs shown, which keep their previous result until it lands.
     SetDiffOptions(DiffOptions),
     /// Result of `Effect::LoadDiff`.
     DiffLoaded {
@@ -992,7 +972,6 @@ pub enum Effect {
         source: DiffSource,
         /// The file, or a rename's old path then new path.
         paths: Vec<String>,
-        layout: DiffLayout,
         whitespace: WhitespaceMode,
     },
     /// Re-read what HEAD points at (after a commit moved it).
@@ -1317,7 +1296,7 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
         Msg::SetDiffOptions(options) => {
             let old = state.diff_options;
             state.diff_options = options;
-            if (options.layout, options.whitespace) == (old.layout, old.whitespace) {
+            if options.whitespace == old.whitespace {
                 return Vec::new();
             }
             state

@@ -8,8 +8,7 @@ use std::sync::Arc;
 use support::{TestRepo, TestStore};
 use tafit_core::{FileDiff, LineAction, LinePatchError, LineRef, LineSide};
 use tafit_state::{
-    AppState, ChangeGroup, DiffLayout, DiffOptions, FileRef, Loadable, Msg, RepoId, RepoState,
-    SelectMode, WindowId,
+    AppState, ChangeGroup, FileRef, Loadable, Msg, RepoId, RepoState, SelectMode, WindowId,
 };
 
 /// Opens `repo` in a fresh store once its change list has loaded.
@@ -424,29 +423,6 @@ fn a_partly_staged_new_file_can_be_unstaged_line_by_line() {
     let state = apply(&store, repo_id, LineAction::Unstage);
     assert_eq!(active(&state).write_error, None);
     assert_eq!(repo.index_file("new.txt"), b"two\n");
-}
-
-#[test]
-fn a_line_only_the_two_column_alignment_calls_changed_is_refused_as_unmapped() {
-    let repo = TestRepo::init("repo");
-    repo.commit_files(&[("a.txt", "a\nb\nc\nd\n")], "base");
-    repo.write("a.txt", "a\nc\nb\nd\n");
-    let (store, repo_id) = open(&repo);
-    store.dispatch(Msg::SetDiffOptions(DiffOptions {
-        layout: DiffLayout::TwoColumn,
-        ..DiffOptions::default()
-    }));
-    show(&store, repo_id, ChangeGroup::Unstaged, "a.txt");
-
-    // The columns show `c` moved up as added; git shows `b` moved down.
-    select_lines(&store, repo_id, &[new(2)]);
-    let state = apply(&store, repo_id, LineAction::Stage);
-
-    assert_eq!(
-        active(&state).write_error,
-        Some(LinePatchError::Unmapped.to_string())
-    );
-    assert_eq!(repo.index_file("a.txt"), b"a\nb\nc\nd\n");
 }
 
 #[test]

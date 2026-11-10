@@ -8,7 +8,8 @@ use tafit_core::{
     CommitId, CommitSummary, CommitTime, Head, History, HistoryIndex, RefLabels, RepositoryInfo,
 };
 use tafit_state::{
-    AppState, Effect, HISTORY_WINDOW, HistoryRequestId, Msg, RepoId, WindowId, reduce,
+    AppState, Effect, HISTORY_WINDOW, HistoryColumns, HistoryRequestId, Msg, RepoId, TabContent,
+    WindowId, reduce,
 };
 
 /// A state with one opened Repository, and the history read that opening
@@ -271,4 +272,49 @@ fn a_commit_made_in_the_app_rereads_the_history() {
     assert!(repo.history.refreshing);
     // The previous history stays shown until the new one lands.
     assert_eq!(repo.history.len(), 1);
+}
+
+#[test]
+fn each_repository_tab_shows_its_changes_or_its_history() {
+    let (mut state, repo_id, _) = opened();
+    assert_eq!(
+        state.repo(repo_id).expect("open").content,
+        TabContent::Changes
+    );
+
+    let effects = reduce(
+        &mut state,
+        Msg::ShowTabContent {
+            repo_id,
+            content: TabContent::History,
+        },
+    );
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.repo(repo_id).expect("open").content,
+        TabContent::History
+    );
+}
+
+#[test]
+fn the_history_columns_shown_can_be_chosen() {
+    let mut state = AppState::default();
+    assert_eq!(
+        state.history_columns,
+        HistoryColumns {
+            author: true,
+            date: true,
+            hash: true,
+        }
+    );
+
+    let columns = HistoryColumns {
+        author: false,
+        date: true,
+        hash: false,
+    };
+    reduce(&mut state, Msg::SetHistoryColumns(columns));
+
+    assert_eq!(state.history_columns, columns);
 }

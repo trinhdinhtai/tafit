@@ -181,6 +181,37 @@ pub struct DiffOptions {
     pub word_wrap: bool,
 }
 
+/// What a Repository Tab shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabContent {
+    /// The change list, the commit box and the selected file's diff.
+    #[default]
+    Changes,
+    /// The commit history.
+    History,
+}
+
+/// Which columns the history list shows beside each commit's message; the
+/// same for every Repository.
+// shortcut: lives only as long as the app runs; the Session (#22) will keep
+// it between runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryColumns {
+    pub author: bool,
+    pub date: bool,
+    pub hash: bool,
+}
+
+impl Default for HistoryColumns {
+    fn default() -> Self {
+        Self {
+            author: true,
+            date: true,
+            hash: true,
+        }
+    }
+}
+
 /// The Line Diff of the one selected file.
 #[derive(Clone, Debug)]
 pub struct DiffState {
@@ -321,6 +352,8 @@ pub struct RepoState {
     reread_diff: bool,
     /// The commit history, read once the Repository opens.
     pub history: HistoryState,
+    /// Whether the tab shows the changes or the history.
+    pub content: TabContent,
 }
 
 impl RepoState {
@@ -347,6 +380,7 @@ impl RepoState {
             watch_session: WatchSession::default(),
             reread_diff: false,
             history: HistoryState::default(),
+            content: TabContent::default(),
         }
     }
 
@@ -672,6 +706,7 @@ pub struct AppState {
     // the Session (#22) will keep them between runs.
     pub pinned: Vec<PathBuf>,
     pub diff_options: DiffOptions,
+    pub history_columns: HistoryColumns,
     /// The system git, found at startup (`Msg::DetectGit`). An error means git
     /// could not be run at all; `GitError::GitNotFound` means it isn't installed.
     pub git: Loadable<GitEnvironment, GitError>,
@@ -693,6 +728,7 @@ impl Default for AppState {
             recent: Vec::new(),
             pinned: Vec::new(),
             diff_options: DiffOptions::default(),
+            history_columns: HistoryColumns::default(),
             git: Loadable::default(),
             git_request: GitRequestId::default(),
             watched: BTreeSet::new(),
@@ -956,6 +992,13 @@ pub enum Msg {
         request: HistoryRequestId,
         result: Result<History, GitError>,
     },
+    /// Show the Repository Tab's changes or its history.
+    ShowTabContent {
+        repo_id: RepoId,
+        content: TabContent,
+    },
+    /// Change which columns the history list shows.
+    SetHistoryColumns(HistoryColumns),
     /// Re-read the Repository's history (the manual refresh).
     RefreshHistory(RepoId),
     /// The history list shows these rows: what is shown about their commits
@@ -1081,6 +1124,16 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             .repo_mut(repo_id)
             .map(|repo| repo.history_loaded(request, result))
             .unwrap_or_default(),
+        Msg::ShowTabContent { repo_id, content } => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                repo.content = content;
+            }
+            Vec::new()
+        }
+        Msg::SetHistoryColumns(columns) => {
+            state.history_columns = columns;
+            Vec::new()
+        }
         Msg::RefreshHistory(repo_id) => match state.repo_mut(repo_id) {
             // An unopened Repository reads its history once it opens.
             Some(repo) if matches!(repo.open, Loadable::Ready(_)) => {

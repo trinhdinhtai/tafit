@@ -3,6 +3,7 @@
 pub mod cli;
 mod detect;
 mod diff;
+mod history;
 mod status;
 
 use std::path::{Path, PathBuf};
@@ -11,9 +12,9 @@ use std::sync::Arc;
 use gix::bstr::BStr;
 
 use tafit_core::{
-    CancellationToken, DiffContext, DiffSource, FileDiff, GitBackend, GitEnvironment, GitError,
-    GitRepository, Head, LineAction, RepositoryInfo, RepositoryPaths, RepositoryStatus,
-    WhitespaceMode,
+    CancellationToken, CommitId, CommitSummary, DiffContext, DiffSource, FileDiff, GitBackend,
+    GitEnvironment, GitError, GitRepository, Head, History, LineAction, RepositoryInfo,
+    RepositoryPaths, RepositoryStatus, WhitespaceMode,
 };
 
 use crate::cli::GitCli;
@@ -258,6 +259,18 @@ impl GitRepository for GixRepository {
 
     fn commit(&self, message: &str, cancel: &CancellationToken) -> Result<(), GitError> {
         self.run_git(&["commit", "--quiet", "--file=-"], message, cancel)
+    }
+
+    fn history(&self, cancel: &CancellationToken) -> Result<History, GitError> {
+        history::history(&self.repo.to_thread_local(), cancel)
+    }
+
+    fn commits(
+        &self,
+        ids: &[CommitId],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<CommitSummary>, GitError> {
+        history::commits(&self.repo.to_thread_local(), ids, cancel)
     }
 }
 

@@ -92,6 +92,63 @@ impl TestRepo {
         self.git(&["commit", "--quiet", "--allow-empty", "-m", message]);
     }
 
+    /// An empty commit authored and committed at `time` (seconds since the
+    /// epoch, UTC), so commits made within one second still have an order.
+    pub fn commit_at(&self, message: &str, time: i64) {
+        let date = format!("@{time} +0000");
+        let output = self
+            .command(&["commit", "--quiet", "--allow-empty", "-m", message])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Adds `count` empty commits on top of `main` in one `git fast-import`,
+    /// far faster than one `git commit` each. Commit `ix` (0-based, oldest
+    /// first) has the message `commit {ix}` and is a second newer than the
+    /// one before it.
+    pub fn import_commits(&self, count: usize) {
+        use std::io::Write;
+        let parent = self.run_git(&["rev-parse", "--verify", "--quiet", "main"]);
+        let parent = String::from_utf8_lossy(&parent.stdout).trim().to_owned();
+        let mut stream = String::new();
+        for ix in 0..count {
+            let time = 1_700_000_000 + ix;
+            let message = format!("commit {ix}");
+            stream += "commit refs/heads/main\n";
+            stream += &format!("author tafit test <test@tafit.invalid> {time} +0000\n");
+            stream += &format!("committer tafit test <test@tafit.invalid> {time} +0000\n");
+            stream += &format!("data {}\n{message}\n", message.len());
+            if ix == 0 && !parent.is_empty() {
+                stream += &format!("from {parent}\n");
+            }
+            stream += "\n";
+        }
+        let mut child = self
+            .command(&["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("run git fast-import");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(stream.as_bytes())
+            .expect("write the import stream");
+        assert!(
+            child.wait().expect("wait for git").success(),
+            "git fast-import failed"
+        );
+        // fast-import moves the branch but leaves the work tree as it was.
+        self.git(&["reset", "--quiet", "--hard"]);
+    }
+
     /// Writes `contents` to the repo-relative `path`, creating its folders.
     pub fn write(&self, path: &str, contents: &str) {
         let path = self.path().join(path);
@@ -152,7 +209,12 @@ impl TestRepo {
     }
 
     fn run_git(&self, args: &[&str]) -> std::process::Output {
-        Command::new("git")
+        self.command(args).output().expect("run git")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command
             .current_dir(self.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", null_device())
@@ -164,9 +226,8 @@ impl TestRepo {
                 "-c",
                 "commit.gpgsign=false",
             ])
-            .args(args)
-            .output()
-            .expect("run git")
+            .args(args);
+        command
     }
 }
 

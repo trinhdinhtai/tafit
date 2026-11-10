@@ -31,10 +31,15 @@ fn opened() -> (AppState, RepoId, StatusRequestId) {
             }),
         },
     );
-    // Opened, the Active Repository is also watched.
+    // Opened, it reads its history too, and the Active Repository is
+    // watched.
     match &effects[..] {
-        [Effect::LoadStatus { request, .. }, Effect::Watch { .. }] => (state, repo_id, *request),
-        other => panic!("expected a status read and a watch, got {other:?}"),
+        [
+            Effect::LoadStatus { request, .. },
+            Effect::LoadHistory { .. },
+            Effect::Watch { .. },
+        ] => (state, repo_id, *request),
+        other => panic!("expected a status read, a history read and a watch, got {other:?}"),
     }
 }
 

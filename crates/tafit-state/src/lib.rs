@@ -2,6 +2,7 @@
 //! `Effect`s. Effects run on worker threads and report back with a new `Msg`.
 //! Never depends on the UI framework.
 
+mod history;
 mod store;
 mod watch;
 
@@ -10,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
-    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, LineAction,
+    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, History, LineAction,
     LinePatchError, LineRef, LineSelection, RepositoryInfo, RepositoryStatus, WhitespaceMode,
 };
 
+pub use history::{HistoryRequestId, HistoryState};
 pub use store::{AppStore, StoreEvent, StoreEvents};
 pub use watch::WatchOptions;
 
@@ -314,6 +316,8 @@ pub struct RepoState {
     /// The shown diff may have changed: re-read it once the latest status
     /// read lands.
     reread_diff: bool,
+    /// The commit history, read once the Repository opens.
+    pub history: HistoryState,
 }
 
 impl RepoState {
@@ -339,7 +343,13 @@ impl RepoState {
             watch: Watch::Off,
             watch_session: WatchSession::default(),
             reread_diff: false,
+            history: HistoryState::default(),
         }
+    }
+
+    /// Starts a new read of the history.
+    fn request_history(&mut self) -> Effect {
+        self.history.request(self.id, self.path.clone())
     }
 
     /// Re-reads what `changes` may have changed. Nothing is read for a
@@ -915,6 +925,12 @@ pub enum Msg {
         session: WatchSession,
         changes: ExternalChanges,
     },
+    /// Result of `Effect::LoadHistory`.
+    HistoryLoaded {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        result: Result<History, GitError>,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -990,6 +1006,12 @@ pub enum Effect {
     Unwatch {
         repo_id: RepoId,
     },
+    /// Read the Repository's whole history index and its ref labels.
+    LoadHistory {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        path: PathBuf,
+    },
 }
 
 /// The pure reducer. Also the store's synchronous mode: tests and benchmarks
@@ -1002,6 +1024,16 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
 
 fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     match msg {
+        Msg::HistoryLoaded {
+            repo_id,
+            request,
+            result,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                repo.history.loaded(request, result);
+            }
+            Vec::new()
+        }
         Msg::WatchChanged {
             repo_id,
             session,
@@ -1129,12 +1161,12 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             match result {
                 Ok(info) => {
                     repo.open = Loadable::Ready(info);
-                    let effect = repo.request_status(true);
+                    let effects = vec![repo.request_status(true), repo.request_history()];
                     let path = repo.path.clone();
                     state.recent.retain(|recent| *recent != path);
                     state.recent.insert(0, path);
                     state.recent.truncate(RECENT_LIMIT);
-                    vec![effect]
+                    effects
                 }
                 Err(err) => {
                     repo.open = Loadable::Error(err.to_string());

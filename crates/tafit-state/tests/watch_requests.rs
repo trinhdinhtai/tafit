@@ -84,6 +84,7 @@ fn kinds(effects: &[Effect]) -> Vec<&'static str> {
             Effect::LoadStatus { .. } => "status",
             Effect::LoadInfo { .. } => "info",
             Effect::LoadDiff { .. } => "diff",
+            Effect::LoadHistory { .. } => "history",
             Effect::Watch { .. } => "watch",
             Effect::Unwatch { .. } => "unwatch",
             Effect::CloseRepo { .. } => "close",
@@ -133,7 +134,7 @@ fn one_watched() -> (AppState, RepoId, WatchSession) {
             }),
         },
     );
-    assert_eq!(kinds(&effects), ["status", "watch"]);
+    assert_eq!(kinds(&effects), ["status", "history", "watch"]);
     let session = session(&effects, repo_id);
     land_status(&mut state, repo_id, &effects);
     (state, repo_id, session)
@@ -182,7 +183,7 @@ fn an_opened_active_repository_is_watched_until_its_tab_is_left() {
             }),
         },
     );
-    assert_eq!(kinds(&effects), ["status", "watch"]);
+    assert_eq!(kinds(&effects), ["status", "history", "watch"]);
 }
 
 #[test]

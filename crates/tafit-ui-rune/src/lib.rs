@@ -5,6 +5,7 @@
 
 mod diff;
 mod fonts;
+mod history;
 mod host;
 mod icons;
 mod pages;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use rune::{Cx, El, col, row, text};
 use rune_kit::Kit;
 use rune_kit::shell::TabDragState;
-use tafit_state::{AppState, AppStore, Loadable, Msg, Page, RepoState, WindowId};
+use tafit_state::{AppState, AppStore, Loadable, Msg, Page, RepoState, TabContent, WindowId};
 
 pub use host::run_app as run;
 
@@ -42,6 +43,9 @@ pub(crate) struct Ui {
     commit_source: Option<(tafit_state::RepoId, u64)>,
     /// The diff view of the selected file.
     diff: diff::ShownDiff,
+    /// The Repository and the first and last history windows last told to
+    /// the store as on screen.
+    history_windows: Option<(tafit_state::RepoId, usize, usize)>,
 }
 
 impl Ui {
@@ -59,6 +63,7 @@ impl Ui {
             commit: rune::TextEdit::new(""),
             commit_source: None,
             diff: diff::ShownDiff::default(),
+            history_windows: None,
         };
         ui.sync_commit_message();
         ui.sync_diff();
@@ -128,6 +133,9 @@ fn repository_tab_body(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) -
     match &repo.open {
         Loadable::Loading => centered("Opening…", k.c.text_muted, k),
         Loadable::Error(message) => centered(message, k.c.danger.fg, k).key("repository-error"),
+        Loadable::Ready(_) if repo.content == TabContent::History => {
+            history::history_panel(s, repo, k)
+        }
         Loadable::Ready(_) => {
             // The change list on the left, the selected file's diff beside it.
             let panes = row()

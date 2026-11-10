@@ -1,10 +1,11 @@
 //! The toolbar under the tab bar: the Active Repository, where its HEAD is,
-//! and how many files changed in each group.
+//! how many files changed in each group, and whether its tab shows the
+//! changes or the history.
 
 use rune::{El, icon, row, text};
-use rune_kit::Kit;
+use rune_kit::{Kit, SegmentedControl};
 use tafit_core::Head;
-use tafit_state::{Loadable, Page};
+use tafit_state::{Loadable, Msg, Page, RepoState, TabContent};
 
 use crate::Ui;
 
@@ -55,6 +56,32 @@ pub(crate) fn toolbar(s: &Ui, k: &Kit) -> Option<El> {
             .fill(k.c.bg_base)
             .child(name)
             .child(label(head, "toolbar-head"))
-            .child(label(changes, "toolbar-changes")),
+            .child(label(changes, "toolbar-changes"))
+            .child(crate::spacer())
+            .child(content_switch(repo, k)),
     )
+}
+
+/// Changes or History, for the Active Repository's tab.
+fn content_switch(repo: &RepoState, k: &Kit) -> El {
+    const CONTENTS: [(&str, TabContent); 2] = [
+        ("Changes", TabContent::Changes),
+        ("History", TabContent::History),
+    ];
+    let selected = CONTENTS
+        .iter()
+        .position(|(_, content)| *content == repo.content);
+    let labels = CONTENTS.map(|(label, _)| label);
+    let repo_id = repo.id;
+    SegmentedControl::new(&labels, selected)
+        .label("View")
+        .fit()
+        .on_pick(move |s: &mut Ui, ix: usize, _: &mut rune::Tx| {
+            s.dispatch(Msg::ShowTabContent {
+                repo_id,
+                content: CONTENTS[ix].1,
+            });
+        })
+        .build(k)
+        .key("repository-view")
 }

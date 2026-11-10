@@ -9,6 +9,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rune::{El, KeyEvent, Tx, col, row};
 use rune_kit::diff::{self as kit, DiffMode, DiffView, LineRange, Side};
@@ -27,11 +28,31 @@ pub(crate) struct ShownDiff {
     pub(crate) view: kit::DiffState,
     /// The file and result `view` holds; another result rebuilds it.
     source: Option<(FileRef, Arc<FileDiff>)>,
+    /// When the selected file's diff started loading; `None` once it has.
+    waiting_since: Option<Instant>,
+    /// The diff has been loading for `READING_DELAY`: the pane says so.
+    reading: bool,
 }
+
+/// How long a diff may take before the pane says it is reading it. Most
+/// load well within it, so until then the pane keeps what it showed rather
+/// than flashing a notice at every click.
+const READING_DELAY: Duration = Duration::from_millis(200);
 
 impl Ui {
     /// Brings the diff view in step with the snapshot.
     pub(crate) fn sync_diff(&mut self) {
+        let loading = self
+            .state
+            .active_in(self.window)
+            .and_then(|repo| repo.diff.as_ref())
+            .is_some_and(|diff| matches!(diff.diff, Loadable::Loading));
+        if loading {
+            self.diff.waiting_since.get_or_insert_with(Instant::now);
+        } else {
+            self.diff.waiting_since = None;
+            self.diff.reading = false;
+        }
         let options = self.state.diff_options;
         let shown = self.state.active_in(self.window).and_then(|repo| {
             let diff = repo.diff.as_ref()?;
@@ -75,6 +96,25 @@ impl Ui {
             .and_then(|shown| range_of(&lines, shown));
         self.diff.view.set_selection(range);
     }
+
+    /// Whether the loading diff just reached `READING_DELAY`, so the pane
+    /// must be drawn again to say it is reading; until then, asks to be
+    /// woken when it does.
+    pub(crate) fn diff_wait_elapsed(&mut self, tx: &mut Tx) -> bool {
+        let Some(since) = self.diff.waiting_since else {
+            return false;
+        };
+        if self.diff.reading {
+            return false;
+        }
+        let waited = since.elapsed();
+        if waited >= READING_DELAY {
+            self.diff.reading = true;
+            return true;
+        }
+        tx.wake_after(READING_DELAY - waited);
+        false
+    }
 }
 
 pub(crate) fn diff_pane(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -88,7 +128,16 @@ pub(crate) fn diff_pane(s: &Ui, repo: &RepoState, k: &Kit, layer: &mut Vec<El>) 
             centered(hint, k.c.text_muted, k).key("diff-empty")
         }
         Some(diff) => match &diff.diff {
-            Loadable::Loading => centered("Reading diff…", k.c.text_muted, k),
+            Loadable::Loading if s.diff.reading => centered("Reading diff…", k.c.text_muted, k),
+            // Briefly, the last diff shown stays (picking lines in it does
+            // nothing), so a quick load swaps it for the new one without a
+            // flash in between.
+            Loadable::Loading if !s.diff.view.files().is_empty() => {
+                DiffView::new(|s: &Ui| &s.diff.view, |s: &mut Ui| &mut s.diff.view)
+                    .key("diff-lines")
+                    .build(s, k)
+            }
+            Loadable::Loading => col().grow(1.0),
             Loadable::Error(message) => centered(message, k.c.danger.fg, k),
             Loadable::Ready(loaded) => match &**loaded {
                 FileDiff::Binary => {

@@ -43,6 +43,23 @@ pub const BUDGETS: &[Budget] = &[
         limit: Limit::Time(Duration::from_millis(100)),
         suite: Suite::Pr,
     },
+    // The whole history index of a 100,000-commit Repository with no
+    // commit-graph file, the slowest case, until the store publishes it.
+    // About 830 ms on a Windows dev machine; with a commit-graph file the
+    // same history takes about 85 ms. The nightly snapshots run unbudgeted
+    // until they have a few nights of results.
+    Budget {
+        benchmark: "history/index/100k_commits",
+        limit: Limit::Time(Duration::from_millis(1500)),
+        suite: Suite::Pr,
+    },
+    // One 256-row window of commit metadata in the middle of that history,
+    // until the store publishes it. About 7 ms on a Windows dev machine.
+    Budget {
+        benchmark: "history/window/100k_commits",
+        limit: Limit::Time(Duration::from_millis(50)),
+        suite: Suite::Pr,
+    },
     Budget {
         benchmark: "idle_cpu/1_repo",
         limit: Limit::CpuShare {

@@ -4,7 +4,7 @@ Crate `tafit-perf` chứa các benchmark Criterion chạy qua store và backend 
 
 ## Tập PR (mặc định)
 
-Mở một repo fixture tạo bằng git CLI, đo CPU idle với 1 và 10 Repository, đo chuyển Repository Tab khi có 20 tab đang mở (từ `Msg::ActivateRepo` tới lúc store công bố snapshot mới, chưa tính vẽ lại UI), và đo refresh status trên một repo fixture 80 nghìn file có thay đổi (đã stage, chưa stage, untracked). Mất vài phút sau khi build xong, phần lớn là để dựng repo 80 nghìn file.
+Mở một repo fixture tạo bằng git CLI, đo CPU idle với 1 và 10 Repository, đo chuyển Repository Tab khi có 20 tab đang mở (từ `Msg::ActivateRepo` tới lúc store công bố snapshot mới, chưa tính vẽ lại UI), đo refresh status trên một repo fixture 80 nghìn file có thay đổi (đã stage, chưa stage, untracked), và đo lịch sử trên một repo fixture 100 nghìn commit dựng bằng `git fast-import` (có merge, nhánh, tag, không có file commit-graph): dựng chỉ mục topology cho toàn bộ lịch sử, tính cả mở repo (`history/index/*`), và đọc một cửa sổ metadata 256 dòng ở giữa lịch sử (`history/window/*`). Mất vài phút sau khi build xong, phần lớn là để dựng repo 80 nghìn file.
 
 ```bash
 cargo bench -p tafit-perf
@@ -30,7 +30,7 @@ Chỉ chạy một benchmark: `cargo bench -p tafit-perf --bench idle -- idle_cp
 
 ## Bộ đầy đủ (như job hằng đêm)
 
-Thêm đo RSS tăng qua 10 phút idle (khoảng 11 phút) và mở rồi đọc status các snapshot repo thật: Git, Bun và Chromium. Snapshot là bản clone blobless toàn bộ lịch sử tới một tag cố định; Chromium chiếm nhiều GB, nên tải một lần rồi dùng lại.
+Thêm đo RSS tăng qua 10 phút idle (khoảng 11 phút), và mở rồi đọc status, dựng chỉ mục lịch sử và đọc một cửa sổ metadata trên các snapshot repo thật: Git, Bun và Chromium. Snapshot là bản clone blobless toàn bộ lịch sử tới một tag cố định; Chromium chiếm nhiều GB, nên tải một lần rồi dùng lại.
 
 ```bash
 ./scripts/perf-snapshots.sh ~/tafit-perf-snapshots

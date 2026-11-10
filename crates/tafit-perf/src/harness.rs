@@ -2,6 +2,7 @@
 //! backend, and measurements for idle CPU and memory.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use criterion::measurement::{Measurement, ValueFormatter};
 use criterion::{Criterion, Throughput};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-use tafit_core::RepositoryStatus;
+use tafit_core::{HistoryIndex, RepositoryStatus};
 use tafit_git_gix::GixBackend;
 use tafit_state::{
     AppStore, Loadable, Msg, RepoId, RepoState, StoreEvents, Watch, WatchOptions, WindowId,
@@ -118,6 +119,68 @@ impl Fixture {
         fixture
     }
 
+    /// A Repository named `name` whose history has `commits` empty commits,
+    /// written in one `git fast-import`: a main line where every 50th commit
+    /// merges a side commit branched five commits back, a branch every 1,000
+    /// commits, a tag every 5,000, and the last side commit on `side`. No
+    /// commit-graph file is written, so the history is walked from the
+    /// objects alone.
+    pub fn history(name: &str, commits: usize) -> Self {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let fixture = Self::new(name, 0);
+        let mut stream = String::with_capacity(commits * 160);
+        // Marks are positive numbers: main line commit `ix` is `ix + 1`, the
+        // side commit it merges `commits + ix + 1`.
+        let (main, side) = (|ix: usize| ix + 1, |ix: usize| commits + ix + 1);
+        let header = |stream: &mut String, branch: &str, mark: usize, ix: usize| {
+            let time = 1_700_000_000 + ix;
+            let message = format!("commit {ix}");
+            *stream += &format!("commit refs/heads/{branch}\nmark :{mark}\n");
+            *stream += &format!("author tafit perf <perf@tafit.invalid> {time} +0000\n");
+            *stream += &format!("committer tafit perf <perf@tafit.invalid> {time} +0000\n");
+            *stream += &format!("data {}\n{message}\n", message.len());
+        };
+        for ix in 0..commits {
+            let merges = ix >= 5 && ix % 50 == 0;
+            if merges {
+                header(&mut stream, "side", side(ix), ix);
+                stream += &format!("from :{}\n\n", main(ix - 5));
+            }
+            header(&mut stream, "main", main(ix), ix);
+            if ix > 0 {
+                stream += &format!("from :{}\n", main(ix - 1));
+            }
+            if merges {
+                stream += &format!("merge :{}\n", side(ix));
+            }
+            stream += "\n";
+            if ix % 1000 == 999 {
+                stream += &format!("reset refs/heads/branch-{ix}\nfrom :{}\n\n", main(ix));
+            }
+            if ix % 5000 == 4999 {
+                stream += &format!("reset refs/tags/v{ix}\nfrom :{}\n\n", main(ix));
+            }
+        }
+        let mut child = fixture
+            .command(&["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("run git fast-import");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(stream.as_bytes())
+            .expect("write the import stream");
+        assert!(
+            child.wait().expect("wait for git").success(),
+            "git fast-import failed"
+        );
+        fixture
+    }
+
     /// The work tree to open.
     pub fn path(&self) -> &Path {
         &self.path
@@ -125,8 +188,18 @@ impl Fixture {
 
     /// Runs git in the fixture, isolated from the user's and system's config.
     fn git(&self, args: &[&str]) {
+        let output = self.command(args).output().expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
         let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .current_dir(&self.path)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", null)
@@ -137,14 +210,8 @@ impl Fixture {
                 "user.email=perf@tafit.invalid",
             ])
             .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .args(args);
+        command
     }
 }
 
@@ -247,6 +314,62 @@ impl Store {
             .find(|repo| repo.id == repo_id)
             .expect("the Repository is open")
             .clone()
+    }
+
+    /// Opens `path` like `open`, then also waits for its history index.
+    /// Returns the number of commits in it.
+    pub fn open_with_history(&self, path: &Path) -> (RepoId, usize) {
+        let repo_id = self.open(path);
+        let index = self.wait_for_history(repo_id, None);
+        (repo_id, index.len())
+    }
+
+    /// Re-reads `repo_id`'s history (`Msg::RefreshHistory`) and blocks until
+    /// the new index is published.
+    pub fn refresh_history(&self, repo_id: RepoId) {
+        let previous = match &self.repo(repo_id).history.index {
+            Loadable::Ready(index) => Arc::clone(index),
+            _ => panic!("refresh_history needs a history to replace"),
+        };
+        self.store.dispatch(Msg::RefreshHistory(repo_id));
+        self.wait_for_history(repo_id, Some(&previous));
+    }
+
+    /// Blocks until `repo_id` has a history index other than `previous`.
+    /// Panics if it fails to load.
+    fn wait_for_history(
+        &self,
+        repo_id: RepoId,
+        previous: Option<&Arc<HistoryIndex>>,
+    ) -> Arc<HistoryIndex> {
+        loop {
+            match &self.repo(repo_id).history.index {
+                Loadable::Ready(index) if previous.is_none_or(|p| !Arc::ptr_eq(p, index)) => {
+                    return Arc::clone(index);
+                }
+                Loadable::Error(err) => panic!("the history failed: {err}"),
+                _ => {}
+            }
+            self.events.recv_blocking().expect("the store is running");
+        }
+    }
+
+    /// Shows `rows` of `repo_id`'s history list (`Msg::ShowHistoryRows`) and
+    /// blocks until what is shown about the first and last of them is
+    /// published. Panics if it fails to load.
+    pub fn show_history_rows(&self, repo_id: RepoId, rows: Range<usize>) {
+        let (first, last) = (rows.start, rows.end - 1);
+        self.store.dispatch(Msg::ShowHistoryRows { repo_id, rows });
+        loop {
+            let history = self.repo(repo_id).history;
+            if let Some(err) = history.commit_error(first).or(history.commit_error(last)) {
+                panic!("the commits failed: {err}");
+            }
+            if history.commit(first).is_some() && history.commit(last).is_some() {
+                return;
+            }
+            self.events.recv_blocking().expect("the store is running");
+        }
     }
 
     /// Selects `repo_id`'s tab (`Msg::ActivateRepo`) and blocks until it is

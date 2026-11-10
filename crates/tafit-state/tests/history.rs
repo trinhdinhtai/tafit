@@ -8,7 +8,7 @@ use std::path::Path;
 
 use support::{TestRepo, TestStore};
 use tafit_core::{RefKind, RefLabel};
-use tafit_state::{AppState, HistoryState, Loadable, Msg, RepoId, WindowId};
+use tafit_state::{AppState, HISTORY_WINDOW, HistoryState, Loadable, Msg, RepoId, WindowId};
 
 /// Opens `path` and waits until its history index has loaded.
 fn open(store: &TestStore, path: &Path) -> RepoId {
@@ -231,4 +231,57 @@ fn a_bare_repository_has_a_history_too() {
 
     let state = store.store.snapshot();
     assert_eq!(ids(&state, repo_id), git_order(&bare));
+}
+
+#[test]
+fn rows_shown_in_the_middle_of_the_history_load_the_window_they_are_in() {
+    let repo = TestRepo::init("windows");
+    repo.import_commits(3 * HISTORY_WINDOW - 68);
+    let store = TestStore::new();
+    let repo_id = open(&store, repo.path());
+
+    store.dispatch(Msg::ShowHistoryRows {
+        repo_id,
+        rows: 300..320,
+    });
+
+    let state = store.wait_until(|state| history(state, repo_id).commit(300).is_some());
+    let history = history(&state, repo_id);
+    let shown = history.commit(300).expect("the row loaded");
+    let git = repo.git(&["log", "--skip=300", "-1", "--format=%H%n%s%n%an%n%ae%n%at"]);
+    let git: Vec<&str> = git.lines().collect();
+    assert_eq!(shown.id.to_string(), git[0]);
+    assert_eq!(history.commit_id(300), Some(shown.id));
+    assert_eq!(shown.summary, git[1]);
+    assert_eq!(shown.author_name, git[2]);
+    assert_eq!(shown.author_email, git[3]);
+    assert_eq!(shown.author_time.seconds.to_string(), git[4]);
+    // The whole window holding those rows loads, and nothing else.
+    for row in HISTORY_WINDOW..2 * HISTORY_WINDOW {
+        assert!(history.commit(row).is_some(), "row {row} is in the window");
+    }
+    assert!(history.commit(HISTORY_WINDOW - 1).is_none());
+    assert!(history.commit(2 * HISTORY_WINDOW).is_none());
+}
+
+#[test]
+fn rows_across_two_windows_load_both() {
+    let repo = TestRepo::init("two-windows");
+    repo.import_commits(2 * HISTORY_WINDOW + 10);
+    let store = TestStore::new();
+    let repo_id = open(&store, repo.path());
+
+    store.dispatch(Msg::ShowHistoryRows {
+        repo_id,
+        rows: HISTORY_WINDOW + 250..2 * HISTORY_WINDOW + 5,
+    });
+
+    let state = store.wait_until(|state| {
+        let history = history(state, repo_id);
+        history.commit(HISTORY_WINDOW).is_some() && history.commit(2 * HISTORY_WINDOW + 9).is_some()
+    });
+    let last = history(&state, repo_id)
+        .commit(2 * HISTORY_WINDOW + 9)
+        .expect("the oldest commit loaded");
+    assert_eq!(last.summary, "commit 0");
 }

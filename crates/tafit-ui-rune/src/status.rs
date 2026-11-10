@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use rune::{El, ScrollSpec, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, Kit, TextArea};
+use rune_kit::{Button, ButtonVariant, Kit, ScrollBar, TextArea};
 use tafit_core::{ChangeKind, FileChange, RepositoryStatus};
 use tafit_state::{ChangeGroup, FileRef, Loadable, Msg, RepoState, SelectMode};
 
@@ -103,6 +103,7 @@ fn change_list(status: Arc<RepositoryStatus>, k: &Kit) -> El {
             stick_bottom: false,
         })
         .child(rows)
+        .scroll_bar(k)
 }
 
 /// The shown status, which the virtual rows read on every build.

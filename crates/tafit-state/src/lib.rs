@@ -2,6 +2,7 @@
 //! `Effect`s. Effects run on worker threads and report back with a new `Msg`.
 //! Never depends on the UI framework.
 
+mod history;
 mod store;
 mod watch;
 
@@ -10,10 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tafit_core::{
-    ChangeKind, DiffSource, FileChange, FileDiff, GitEnvironment, GitError, LineAction,
-    LinePatchError, LineRef, LineSelection, RepositoryInfo, RepositoryStatus, WhitespaceMode,
+    ChangeKind, CommitId, CommitSummary, DiffSource, FileChange, FileDiff, GitEnvironment,
+    GitError, History, LineAction, LinePatchError, LineRef, LineSelection, RepositoryInfo,
+    RepositoryStatus, WhitespaceMode,
 };
 
+pub use history::{
+    HISTORY_WINDOW, HistoryRequestId, HistoryState, history_window, history_window_rows,
+};
 pub use store::{AppStore, StoreEvent, StoreEvents};
 pub use watch::WatchOptions;
 
@@ -176,6 +181,37 @@ pub struct DiffOptions {
     pub word_wrap: bool,
 }
 
+/// What a Repository Tab shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabContent {
+    /// The change list, the commit box and the selected file's diff.
+    #[default]
+    Changes,
+    /// The commit history.
+    History,
+}
+
+/// Which columns the history list shows beside each commit's message; the
+/// same for every Repository.
+// shortcut: lives only as long as the app runs; the Session (#22) will keep
+// it between runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryColumns {
+    pub author: bool,
+    pub date: bool,
+    pub hash: bool,
+}
+
+impl Default for HistoryColumns {
+    fn default() -> Self {
+        Self {
+            author: true,
+            date: true,
+            hash: true,
+        }
+    }
+}
+
 /// The Line Diff of the one selected file.
 #[derive(Clone, Debug)]
 pub struct DiffState {
@@ -314,6 +350,10 @@ pub struct RepoState {
     /// The shown diff may have changed: re-read it once the latest status
     /// read lands.
     reread_diff: bool,
+    /// The commit history, read once the Repository opens.
+    pub history: HistoryState,
+    /// Whether the tab shows the changes or the history.
+    pub content: TabContent,
 }
 
 impl RepoState {
@@ -339,7 +379,29 @@ impl RepoState {
             watch: Watch::Off,
             watch_session: WatchSession::default(),
             reread_diff: false,
+            history: HistoryState::default(),
+            content: TabContent::default(),
         }
+    }
+
+    /// Starts a new read of the history.
+    fn request_history(&mut self) -> Effect {
+        self.history.request(self.id, self.path.clone())
+    }
+
+    /// Takes the result of a history read and reads the shown rows of it.
+    fn history_loaded(
+        &mut self,
+        request: HistoryRequestId,
+        result: Result<History, GitError>,
+    ) -> Vec<Effect> {
+        self.history
+            .loaded(self.id, self.path.clone(), request, result)
+    }
+
+    /// The history list shows `rows`: reads what is missing of them.
+    fn show_history_rows(&mut self, rows: std::ops::Range<usize>) -> Vec<Effect> {
+        self.history.show_rows(self.id, self.path.clone(), rows)
     }
 
     /// Re-reads what `changes` may have changed. Nothing is read for a
@@ -363,8 +425,15 @@ impl RepoState {
                 path: self.path.clone(),
             });
         }
-        // shortcut: nothing shows tags yet; the history (#14) will re-read
-        // them on `ChangeFlags::TAG`.
+        // HEAD or a ref moved: the history starts from them.
+        // shortcut: re-walks the whole history, seconds on the largest
+        // Repositories; an incremental walk from the old tips would not.
+        if changes
+            .flags
+            .intersects(ChangeFlags::GIT_STATE | ChangeFlags::TAG)
+        {
+            effects.push(self.request_history());
+        }
         effects
     }
 
@@ -637,6 +706,7 @@ pub struct AppState {
     // the Session (#22) will keep them between runs.
     pub pinned: Vec<PathBuf>,
     pub diff_options: DiffOptions,
+    pub history_columns: HistoryColumns,
     /// The system git, found at startup (`Msg::DetectGit`). An error means git
     /// could not be run at all; `GitError::GitNotFound` means it isn't installed.
     pub git: Loadable<GitEnvironment, GitError>,
@@ -658,6 +728,7 @@ impl Default for AppState {
             recent: Vec::new(),
             pinned: Vec::new(),
             diff_options: DiffOptions::default(),
+            history_columns: HistoryColumns::default(),
             git: Loadable::default(),
             git_request: GitRequestId::default(),
             watched: BTreeSet::new(),
@@ -915,6 +986,34 @@ pub enum Msg {
         session: WatchSession,
         changes: ExternalChanges,
     },
+    /// Result of `Effect::LoadHistory`.
+    HistoryLoaded {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        result: Result<History, GitError>,
+    },
+    /// Show the Repository Tab's changes or its history.
+    ShowTabContent {
+        repo_id: RepoId,
+        content: TabContent,
+    },
+    /// Change which columns the history list shows.
+    SetHistoryColumns(HistoryColumns),
+    /// Re-read the Repository's history (the manual refresh).
+    RefreshHistory(RepoId),
+    /// The history list shows these rows: what is shown about their commits
+    /// is read, a `HISTORY_WINDOW` of rows at a time.
+    ShowHistoryRows {
+        repo_id: RepoId,
+        rows: std::ops::Range<usize>,
+    },
+    /// Result of `Effect::LoadCommits`.
+    CommitsLoaded {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        window: usize,
+        result: Result<Vec<CommitSummary>, GitError>,
+    },
 }
 
 /// Work the reducer asks for; executed off the store thread.
@@ -990,6 +1089,21 @@ pub enum Effect {
     Unwatch {
         repo_id: RepoId,
     },
+    /// Read the Repository's whole history index and its ref labels.
+    LoadHistory {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        path: PathBuf,
+    },
+    /// Read what the history list shows about `ids`, window `window` of
+    /// the index history read `request` gave.
+    LoadCommits {
+        repo_id: RepoId,
+        request: HistoryRequestId,
+        window: usize,
+        path: PathBuf,
+        ids: Vec<CommitId>,
+    },
 }
 
 /// The pure reducer. Also the store's synchronous mode: tests and benchmarks
@@ -1002,6 +1116,46 @@ pub fn reduce(state: &mut AppState, msg: Msg) -> Vec<Effect> {
 
 fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
     match msg {
+        Msg::HistoryLoaded {
+            repo_id,
+            request,
+            result,
+        } => state
+            .repo_mut(repo_id)
+            .map(|repo| repo.history_loaded(request, result))
+            .unwrap_or_default(),
+        Msg::ShowTabContent { repo_id, content } => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                repo.content = content;
+            }
+            Vec::new()
+        }
+        Msg::SetHistoryColumns(columns) => {
+            state.history_columns = columns;
+            Vec::new()
+        }
+        Msg::RefreshHistory(repo_id) => match state.repo_mut(repo_id) {
+            // An unopened Repository reads its history once it opens.
+            Some(repo) if matches!(repo.open, Loadable::Ready(_)) => {
+                vec![repo.request_history()]
+            }
+            _ => Vec::new(),
+        },
+        Msg::ShowHistoryRows { repo_id, rows } => state
+            .repo_mut(repo_id)
+            .map(|repo| repo.show_history_rows(rows))
+            .unwrap_or_default(),
+        Msg::CommitsLoaded {
+            repo_id,
+            request,
+            window,
+            result,
+        } => {
+            if let Some(repo) = state.repo_mut(repo_id) {
+                repo.history.commits_loaded(request, window, result);
+            }
+            Vec::new()
+        }
         Msg::WatchChanged {
             repo_id,
             session,
@@ -1129,12 +1283,12 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
             match result {
                 Ok(info) => {
                     repo.open = Loadable::Ready(info);
-                    let effect = repo.request_status(true);
+                    let effects = vec![repo.request_status(true), repo.request_history()];
                     let path = repo.path.clone();
                     state.recent.retain(|recent| *recent != path);
                     state.recent.insert(0, path);
                     state.recent.truncate(RECENT_LIMIT);
-                    vec![effect]
+                    effects
                 }
                 Err(err) => {
                     repo.open = Loadable::Error(err.to_string());
@@ -1428,6 +1582,7 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     repo_id,
                     path: repo.path.clone(),
                 });
+                effects.push(repo.request_history());
             }
             effects
         }

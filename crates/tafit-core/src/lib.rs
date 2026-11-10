@@ -3,8 +3,12 @@
 
 mod align;
 mod highlight;
+mod history;
 mod patch;
 
+pub use history::{
+    CommitId, CommitSummary, CommitTime, History, HistoryIndex, RefKind, RefLabel, RefLabels,
+};
 pub use patch::{LineAction, LinePatchError, LineRef, LineSelection, LineSide, line_patch};
 
 use std::ops::Range;
@@ -527,4 +531,17 @@ pub trait GitRepository: Send + Sync {
     /// Commits what is staged with `message`, as `git commit` does: hooks
     /// run, and `commit.gpgsign` signs it.
     fn commit(&self, message: &str, cancel: &CancellationToken) -> Result<(), GitError>;
+
+    /// The whole history: every commit reachable from HEAD and the branches,
+    /// remote branches and tags, as `git rev-list --date-order` orders them,
+    /// with the labels of those refs. Other refs (Hidden Refs, notes, the
+    /// stash) never start it.
+    fn history(&self, cancel: &CancellationToken) -> Result<History, GitError>;
+
+    /// What the history list shows about each of `ids`, in the same order.
+    fn commits(
+        &self,
+        ids: &[CommitId],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<CommitSummary>, GitError>;
 }

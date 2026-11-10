@@ -5,14 +5,17 @@
 //!
 //! The Repository is `TAFIT_REPO`, or the current directory. `TAFIT_SELECT`
 //! (`staged:path`, `unstaged:path` or `untracked:path`) selects a file and
-//! waits for its diff too.
+//! waits for its diff too. `TAFIT_VIEW=history` shows the history instead
+//! of the changes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tafit_git_gix::GixBackend;
-use tafit_state::{AppStore, ChangeGroup, FileRef, Loadable, Msg, SelectMode, WindowId};
+use tafit_state::{
+    AppStore, ChangeGroup, FileRef, Loadable, Msg, SelectMode, TabContent, WindowId,
+};
 
 fn main() {
     let path = std::env::var_os("TAFIT_REPO").map_or_else(|| PathBuf::from("."), PathBuf::from);
@@ -43,6 +46,19 @@ fn main() {
             repo.diff
                 .as_ref()
                 .is_some_and(|diff| matches!(diff.diff, Loadable::Ready(_)))
+        });
+    }
+    if std::env::var("TAFIT_VIEW").is_ok_and(|view| view == "history") {
+        let repo_id = store
+            .snapshot()
+            .active_repo()
+            .expect("the opened Repository");
+        store.dispatch(Msg::ShowTabContent {
+            repo_id,
+            content: TabContent::History,
+        });
+        wait(&store, |repo| {
+            repo.content == TabContent::History && matches!(repo.history.index, Loadable::Ready(_))
         });
     }
     tafit_ui_rune::run(Arc::new(store), events);

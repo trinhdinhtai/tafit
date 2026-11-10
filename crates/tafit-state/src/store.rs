@@ -8,7 +8,7 @@ use tafit_core::{
 };
 
 use crate::watch::{self, WatchHandle, WatchOptions};
-use crate::{AppState, Effect, LineChange, Msg, RepoId, reduce};
+use crate::{AppState, Effect, HistoryRequestId, LineChange, Msg, RepoId, reduce};
 
 /// Sent to the UI whenever a new snapshot is published. Coalesced: several
 /// publications may arrive as one event, so read `AppStore::snapshot` after it.
@@ -66,9 +66,10 @@ impl AppStore {
             events: events_tx,
             commands: commands.clone(),
             repo_load: WorkerPool::new("tafit-repo-load", repo_load_threads()),
+            history: WorkerPool::new("tafit-history", HISTORY_THREADS),
+            metadata: WorkerPool::new("tafit-metadata", METADATA_THREADS),
             cancel: CancellationToken::default(),
-            status_reads: HashMap::new(),
-            diff_reads: HashMap::new(),
+            reads: LatestReads::default(),
             watch_options,
             watches: HashMap::new(),
         };
@@ -112,13 +113,15 @@ struct StoreWorker {
     /// Effects send their completion `Msg` back through this.
     commands: mpsc::Sender<Command>,
     repo_load: WorkerPool,
+    /// Reads the history, which on a large Repository takes seconds, so
+    /// it never holds up the reads above.
+    history: WorkerPool,
+    /// Reads windows of commit metadata, so rows coming on screen never
+    /// wait for another Repository's history read.
+    metadata: WorkerPool,
     /// Cancelled at shutdown so in-flight reads stop early.
     cancel: CancellationToken,
-    /// Each Repository's latest status read. A newer read cancels the older
-    /// one, whose result the reducer would drop anyway.
-    status_reads: HashMap<RepoId, CancellationToken>,
-    /// Each Repository's latest diff read, cancelled the same way.
-    diff_reads: HashMap<RepoId, CancellationToken>,
+    reads: LatestReads,
     watch_options: WatchOptions,
     /// The watched Repositories; dropping a handle stops its watch.
     watches: HashMap<RepoId, WatchHandle>,
@@ -145,9 +148,7 @@ impl StoreWorker {
             }
         }
         self.cancel.cancel();
-        for read in self.status_reads.values().chain(self.diff_reads.values()) {
-            read.cancel();
-        }
+        self.reads.cancel_all();
         self.watches.clear();
     }
 
@@ -163,11 +164,7 @@ impl StoreWorker {
                 let _ = commands.send(Command::Msg(Msg::RepoOpened { repo_id, result }));
             }),
             Effect::CloseRepo { repo_id } => {
-                for reads in [&mut self.status_reads, &mut self.diff_reads] {
-                    if let Some(read) = reads.remove(&repo_id) {
-                        read.cancel();
-                    }
-                }
+                self.reads.close(repo_id);
                 self.watches.remove(&repo_id);
             }
             Effect::Watch {
@@ -200,10 +197,7 @@ impl StoreWorker {
                 request,
                 path,
             } => {
-                let read = CancellationToken::default();
-                if let Some(older) = self.status_reads.insert(repo_id, read.clone()) {
-                    older.cancel();
-                }
+                let read = self.reads.start(repo_id, Read::Status);
                 self.repo_load.execute(move || {
                     let result = backend
                         .open(&path, &read)
@@ -223,10 +217,7 @@ impl StoreWorker {
                 paths,
                 whitespace,
             } => {
-                let read = CancellationToken::default();
-                if let Some(older) = self.diff_reads.insert(repo_id, read.clone()) {
-                    older.cancel();
-                }
+                let read = self.reads.start(repo_id, Read::Diff);
                 self.repo_load.execute(move || {
                     let result = backend
                         .open(&path, &read)
@@ -279,6 +270,43 @@ impl StoreWorker {
                     .and_then(|repo| repo.commit(&message, &cancel));
                 let _ = commands.send(Command::Msg(Msg::Committed { repo_id, result }));
             }),
+            Effect::LoadHistory {
+                repo_id,
+                request,
+                path,
+            } => {
+                let read = self.reads.start(repo_id, Read::History);
+                self.history.execute(move || {
+                    let result = backend
+                        .open(&path, &read)
+                        .and_then(|repo| repo.history(&read));
+                    let _ = commands.send(Command::Msg(Msg::HistoryLoaded {
+                        repo_id,
+                        request,
+                        result,
+                    }));
+                });
+            }
+            Effect::LoadCommits {
+                repo_id,
+                request,
+                window,
+                path,
+                ids,
+            } => {
+                let read = self.reads.start_commits(repo_id, request);
+                self.metadata.execute(move || {
+                    let result = backend
+                        .open(&path, &read)
+                        .and_then(|repo| repo.commits(&ids, &read));
+                    let _ = commands.send(Command::Msg(Msg::CommitsLoaded {
+                        repo_id,
+                        request,
+                        window,
+                        result,
+                    }));
+                });
+            }
             Effect::LoadInfo { repo_id, path } => self.repo_load.execute(move || {
                 let result = backend
                     .open(&path, &cancel)
@@ -331,6 +359,73 @@ fn apply_lines(
 fn read(state: &RwLock<Arc<AppState>>) -> Arc<AppState> {
     Arc::clone(&state.read().unwrap_or_else(PoisonError::into_inner))
 }
+
+/// A kind of read a Repository has at most one current of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Read {
+    Status,
+    Diff,
+    History,
+    /// The metadata windows of one history index.
+    Commits,
+}
+
+/// Each Repository's latest read of each kind. A newer read cancels the
+/// older one, whose result the reducer would drop anyway.
+#[derive(Default)]
+struct LatestReads(HashMap<(RepoId, Read), (Option<HistoryRequestId>, CancellationToken)>);
+
+impl LatestReads {
+    /// A token for a new read, cancelling the one it supersedes.
+    fn start(&mut self, repo_id: RepoId, read: Read) -> CancellationToken {
+        self.replace(repo_id, read, None)
+    }
+
+    /// A token for reading a window of the index history read `request`
+    /// gave. Windows of one index share it; a window of another index
+    /// cancels them all.
+    fn start_commits(&mut self, repo_id: RepoId, request: HistoryRequestId) -> CancellationToken {
+        match self.0.get(&(repo_id, Read::Commits)) {
+            Some((Some(current), token)) if *current == request => token.clone(),
+            _ => self.replace(repo_id, Read::Commits, Some(request)),
+        }
+    }
+
+    fn replace(
+        &mut self,
+        repo_id: RepoId,
+        read: Read,
+        request: Option<HistoryRequestId>,
+    ) -> CancellationToken {
+        let token = CancellationToken::default();
+        if let Some((_, older)) = self.0.insert((repo_id, read), (request, token.clone())) {
+            older.cancel();
+        }
+        token
+    }
+
+    /// Cancels and forgets every read of a closed Repository.
+    fn close(&mut self, repo_id: RepoId) {
+        self.0.retain(|&(id, _), (_, token)| {
+            if id == repo_id {
+                token.cancel();
+            }
+            id != repo_id
+        });
+    }
+
+    fn cancel_all(&self) {
+        for (_, token) in self.0.values() {
+            token.cancel();
+        }
+    }
+}
+
+/// History reads: one per Repository opening at once, rarely more.
+const HISTORY_THREADS: usize = 2;
+
+/// Metadata reads: a window takes milliseconds, and few are needed at once.
+const METADATA_THREADS: usize = 2;
 
 fn repo_load_threads() -> usize {
     thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4))

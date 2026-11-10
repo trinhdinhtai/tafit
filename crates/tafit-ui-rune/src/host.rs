@@ -91,13 +91,17 @@ fn setup(s: &mut Ui, waker: rune::Waker) {
 }
 
 /// At the start of each frame: the latest snapshot, then the windows it
-/// asks for.
+/// asks for. A diff loading for long enough redraws too, to say so.
 fn poll(s: &mut Ui, _: f64, tx: &mut Tx) -> bool {
-    if !s.refresh() {
-        return false;
+    let changed = s.refresh();
+    let waited = s.diff_wait_elapsed(tx);
+    if std::mem::take(&mut s.diff.switched) {
+        tx.instant();
     }
-    sync_windows(s, tx);
-    true
+    if changed {
+        sync_windows(s, tx);
+    }
+    changed || waited
 }
 
 /// Opens the store's new Windows, closes the ones it dropped, and brings

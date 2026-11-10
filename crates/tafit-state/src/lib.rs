@@ -391,8 +391,15 @@ impl RepoState {
                 path: self.path.clone(),
             });
         }
-        // shortcut: nothing shows tags yet; the history (#14) will re-read
-        // them on `ChangeFlags::TAG`.
+        // HEAD or a ref moved: the history starts from them.
+        // shortcut: re-walks the whole history, seconds on the largest
+        // Repositories; an incremental walk from the old tips would not.
+        if changes
+            .flags
+            .intersects(ChangeFlags::GIT_STATE | ChangeFlags::TAG)
+        {
+            effects.push(self.request_history());
+        }
         effects
     }
 
@@ -1522,6 +1529,7 @@ fn reduce_msg(state: &mut AppState, msg: Msg) -> Vec<Effect> {
                     repo_id,
                     path: repo.path.clone(),
                 });
+                effects.push(repo.request_history());
             }
             effects
         }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use support::{TestRepo, TestStore};
 use tafit_core::{RefKind, RefLabel};
-use tafit_state::{AppState, HISTORY_WINDOW, HistoryState, Loadable, Msg, RepoId, WindowId};
+use tafit_state::{AppState, HISTORY_WINDOW, HistoryState, Loadable, Msg, RepoId, Watch, WindowId};
 
 /// Opens `path` and waits until its history index has loaded.
 fn open(store: &TestStore, path: &Path) -> RepoId {
@@ -284,4 +284,87 @@ fn rows_across_two_windows_load_both() {
         .commit(2 * HISTORY_WINDOW + 9)
         .expect("the oldest commit loaded");
     assert_eq!(last.summary, "commit 0");
+}
+
+/// Opens `path` and waits until its history has loaded and it is watched.
+fn open_watched(store: &TestStore, path: &Path) -> RepoId {
+    let repo_id = open(store, path);
+    store.wait_until(|state| {
+        state
+            .repo(repo_id)
+            .is_some_and(|repo| repo.watch == Watch::Watching)
+    });
+    repo_id
+}
+
+#[test]
+fn a_commit_made_with_the_git_cli_shows_up_in_the_history() {
+    let repo = TestRepo::init("cli-commit");
+    repo.commit_at("first", 1_000);
+    let store = TestStore::new();
+    let repo_id = open_watched(&store, repo.path());
+
+    repo.commit_at("from a terminal", 2_000);
+
+    let state = store.wait_until(|state| history(state, repo_id).len() == 2);
+    assert_eq!(ids(&state, repo_id), git_order(&repo));
+}
+
+#[test]
+fn a_tag_made_with_the_git_cli_shows_up_on_its_commit() {
+    let repo = TestRepo::init("cli-tag");
+    repo.commit_at("first", 1_000);
+    let store = TestStore::new();
+    let repo_id = open_watched(&store, repo.path());
+
+    repo.git(&["tag", "v1"]);
+
+    store.wait_until(|state| {
+        history(state, repo_id)
+            .labels(0)
+            .contains(&label(RefKind::Tag, "v1", false))
+    });
+}
+
+#[test]
+fn switching_branches_with_the_git_cli_moves_head_in_the_history() {
+    let repo = TestRepo::init("cli-switch");
+    repo.commit_at("first", 1_000);
+    repo.git(&["branch", "other"]);
+    let store = TestStore::new();
+    let repo_id = open_watched(&store, repo.path());
+
+    repo.git(&["switch", "--quiet", "other"]);
+
+    store.wait_until(|state| {
+        history(state, repo_id).labels(0)
+            == [
+                label(RefKind::Branch, "other", true),
+                label(RefKind::Branch, "main", false),
+            ]
+    });
+}
+
+#[test]
+fn a_commit_made_in_the_app_shows_up_in_the_history() {
+    let repo = TestRepo::init("app-commit");
+    repo.commit_at("first", 1_000);
+    repo.write("a.txt", "a\n");
+    repo.git(&["add", "a.txt"]);
+    let store = TestStore::new();
+    let repo_id = open(&store, repo.path());
+    store.wait_until(|state| {
+        state
+            .repo(repo_id)
+            .is_some_and(|repo| matches!(repo.status, Loadable::Ready(_)))
+    });
+
+    store.dispatch(Msg::EditCommitMessage {
+        repo_id,
+        message: "from the app".to_owned(),
+    });
+    store.dispatch(Msg::Commit(repo_id));
+
+    let state = store.wait_until(|state| history(state, repo_id).len() == 2);
+    assert_eq!(ids(&state, repo_id), git_order(&repo));
 }

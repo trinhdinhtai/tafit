@@ -195,7 +195,10 @@ fn switching_tabs_moves_the_watch_and_rereads_the_tab_returned_to() {
     let effects = reduce(&mut state, Msg::ActivateRepo(first));
 
     assert!(matches!(effects[0], Effect::Unwatch { repo_id } if repo_id == second));
-    assert_eq!(kinds(&effects), ["unwatch", "watch", "status", "info"]);
+    assert_eq!(
+        kinds(&effects),
+        ["unwatch", "watch", "status", "info", "history"]
+    );
     assert_eq!(state.repo(first).unwrap().watch, Watch::Starting);
     assert_eq!(state.repo(second).unwrap().watch, Watch::Off);
 }
@@ -241,10 +244,10 @@ fn only_what_the_changes_touched_is_reread() {
     assert_eq!(kinds(&index), ["status"]);
 
     let head = files_changed(&mut state, repo_id, session, ChangeFlags::GIT_STATE, None);
-    assert_eq!(kinds(&head), ["status", "info"]);
+    assert_eq!(kinds(&head), ["status", "info", "history"]);
 
     let tag = files_changed(&mut state, repo_id, session, ChangeFlags::TAG, None);
-    assert_eq!(kinds(&tag), Vec::<&str>::new());
+    assert_eq!(kinds(&tag), ["history"]);
 }
 
 #[test]

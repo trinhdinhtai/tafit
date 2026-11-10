@@ -247,3 +247,28 @@ fn rows_shown_before_the_index_loads_are_read_once_it_does() {
     assert_eq!(reads.len(), 1);
     assert_eq!(reads[0].1, 1);
 }
+
+#[test]
+fn a_commit_made_in_the_app_rereads_the_history() {
+    let (mut state, repo_id, first) = opened();
+    land_history(&mut state, repo_id, first, history(0, 1));
+
+    let effects = reduce(
+        &mut state,
+        Msg::Committed {
+            repo_id,
+            result: Ok(()),
+        },
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::LoadHistory { .. })),
+        "expected a history read, got {effects:?}"
+    );
+    let repo = state.repo(repo_id).expect("open");
+    assert!(repo.history.refreshing);
+    // The previous history stays shown until the new one lands.
+    assert_eq!(repo.history.len(), 1);
+}

@@ -32,6 +32,10 @@ pub(crate) struct ShownDiff {
     waiting_since: Option<Instant>,
     /// The diff has been loading for `READING_DELAY`: the pane says so.
     reading: bool,
+    /// `view` now holds another file than when last drawn. Its rows share
+    /// keys with the old file's, so drawing it must not animate, or they
+    /// would slide over from where the old file's rows were.
+    pub(crate) switched: bool,
 }
 
 /// How long a diff may take before the pane says it is reading it. Most
@@ -80,6 +84,7 @@ impl Ui {
                 self.diff.view.set_files(files);
             } else {
                 self.diff.view = kit::DiffState::new(files);
+                self.diff.switched = true;
             }
             self.diff.source = Some((file, loaded));
         }
@@ -110,6 +115,7 @@ impl Ui {
         let waited = since.elapsed();
         if waited >= READING_DELAY {
             self.diff.reading = true;
+            self.diff.switched = true;
             return true;
         }
         tx.wake_after(READING_DELAY - waited);

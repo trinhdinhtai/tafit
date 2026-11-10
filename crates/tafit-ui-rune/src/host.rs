@@ -95,6 +95,9 @@ fn setup(s: &mut Ui, waker: rune::Waker) {
 fn poll(s: &mut Ui, _: f64, tx: &mut Tx) -> bool {
     let changed = s.refresh();
     let waited = s.diff_wait_elapsed(tx);
+    if std::mem::take(&mut s.diff.switched) {
+        tx.instant();
+    }
     if changed {
         sync_windows(s, tx);
     }

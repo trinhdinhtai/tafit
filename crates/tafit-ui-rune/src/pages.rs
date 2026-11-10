@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use rune::{El, FileDialogOptions, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, Kit, Toast, ToastRegion};
+use rune_kit::{Button, ButtonVariant, Kit, ScrollBar, Toast, ToastRegion};
 use tafit_core::{GitEnvironment, GitError, GitVersion};
 use tafit_state::{AppState, Loadable, Msg, Page, WindowId};
 
@@ -68,6 +68,7 @@ pub(crate) fn open_repository(state: &AppState, window: WindowId, k: &Kit) -> El
                 stick_bottom: false,
             })
             .child(col().w_full().gap(2.0).children(rows))
+            .scroll_bar(k)
     };
     page("open-repository-page")
         .child(page_header(
